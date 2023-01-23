@@ -37,6 +37,19 @@ include("openroad")
 
 option(LOAD_PARTITIONERS "Load GPMetis and Chaco" OFF)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_MODULE_PATH               "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+set(CMAKE_CXX_FLAGS                 "${CMAKE_CXX_FLAGS} -DIL_STD -m64 -Wall -fPIC")
+set(CMAKE_INCLUDE_SYSTEM_FLAG_CXX   "-isystem ")
+set(LINKER_OPTIONS                  "-Wl,--export-dynamic")
+
+find_package(Cplex)
+find_package(Threads REQUIRED)
+find_package(ortools REQUIRED)
+include_directories(SYSTEM ${CPLEX_INCLUDE_DIRS})
+
+
 if (LOAD_PARTITIONERS)
     set(PATH_PARTITIONERS ${CMAKE_CURRENT_SOURCE_DIR} CACHE PATH "Path to Partitioners Folder")
     message(STATUS "Using partitioners")
@@ -50,23 +63,25 @@ swig_lib(NAME      par
 
 target_sources(par
   PRIVATE
-    src/Hypergraph.cpp
     src/MakePartitionMgr.cpp
     src/PartitionMgr.cpp
-    src/HypergraphDecomposition.cpp
-    src/PartitionNetwork.cpp
-    src/PartOptions.cpp
+    src/TritonPart.cpp
+    src/TPHypergraph.cpp
+    src/Utilities.cpp
+    src/Coarsening.cpp
+    src/Partitioner.cpp
+    src/Multilevel.cpp
+    src/KPMRefinement.cpp
+    src/ILPbasedRefinement.cpp
+    src/RecordStatistics.cpp
+    src/TPCoarsener.cpp
+    src/TPMultilevel.cpp
+    src/TPPartitioner.cpp
+    src/TPRefiner.cpp
 )
 
 messages(
   TARGET par
-)
-
-add_subdirectory(src/MLPart)
-
-target_link_libraries(par
-    PRIVATE
-      MLPart
 )
 
 if (LOAD_PARTITIONERS)
@@ -116,6 +131,11 @@ target_link_libraries(par
     OpenSTA
     utl
     dbSta
+  PRIVATE
+    ortools::ortools
+    ${CPLEX_LIBRARIES}
+    ${CMAKE_THREAD_LIBS_INIT}
+    dl
 )
 
 unset(LOAD_PARTITIONERS)

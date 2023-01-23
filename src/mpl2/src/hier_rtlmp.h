@@ -60,6 +60,11 @@ namespace utl {
 class Logger;
 }
 
+namespace par {
+class PartitionMgr;
+}
+
+
 namespace mpl2 {
 struct BundledNet;
 class Cluster;
@@ -85,7 +90,8 @@ class HierRTLMP
   HierRTLMP(sta::dbNetwork* network,
             odb::dbDatabase* db,
             sta::dbSta* sta,
-            utl::Logger* logger);
+            utl::Logger* logger,
+            par::PartitionMgr* tritonpart);
   ~HierRTLMP();
 
   // Top Level Interface Function
@@ -231,6 +237,8 @@ class HierRTLMP
   odb::dbBlock* block_ = nullptr;
   sta::dbSta* sta_ = nullptr;
   utl::Logger* logger_ = nullptr;
+  par::PartitionMgr* tritonpart_ = nullptr;
+
 
   // technology-related variables
   float dbu_ = 0.0;

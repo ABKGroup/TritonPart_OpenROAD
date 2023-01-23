@@ -49,7 +49,7 @@
 #include "graphics.h"
 #include "object.h"
 #include "odb/db.h"
-#include "par/MLPart.h"
+#include "par/PartitionMgr.h"
 #include "sta/Liberty.hh"
 #include "utl/Logger.h"
 
@@ -67,12 +67,14 @@ HierRTLMP::~HierRTLMP() = default;
 HierRTLMP::HierRTLMP(sta::dbNetwork* network,
                      odb::dbDatabase* db,
                      sta::dbSta* sta,
-                     utl::Logger* logger)
+                     utl::Logger* logger,
+                     par::PartitionMgr* tritonpart)
 {
   network_ = network;
   db_ = db;
   sta_ = sta;
   logger_ = logger;
+  tritonpart_ = tritonpart; 
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -211,7 +213,6 @@ void HierRTLMP::setReportDirectory(const char* report_directory)
 // Top Level Interface function
 void HierRTLMP::hierRTLMacroPlacer()
 {
-  //
   // Get the database information
   //
   block_ = db_->getChip()->getBlock();
@@ -1797,16 +1798,12 @@ void HierRTLMP::breakLargeFlatCluster(Cluster* parent)
   std::map<odb::dbInst*, int> inst_vertex_id_map;
   const int parent_cluster_id = parent->getId();
   std::vector<odb::dbInst*> std_cells = parent->getLeafStdCells();
-  std::vector<int> col_idx;  // edges represented by vertex indices
-  std::vector<int> row_ptr;  // pointers for edges
+  std::vector<std::vector<int> > hyperedges;
+  std::vector<float> vertex_weight;
   // vertices
   // other clusters behaves like fixed vertices
   // We do not consider vertices only between fixed vertices
-  int num_vertices = cluster_map_.size();
-  num_vertices += parent->getLeafMacros().size();
-  num_vertices += std_cells.size();
   int vertex_id = 0;
-  std::vector<float> vertex_weight;
   for (auto& [cluster_id, cluster] : cluster_map_) {
     cluster_vertex_id_map[cluster_id] = vertex_id++;
     vertex_weight.push_back(0.0f);
@@ -1816,15 +1813,14 @@ void HierRTLMP::breakLargeFlatCluster(Cluster* parent)
     const sta::LibertyCell* liberty_cell = network_->libertyCell(macro);
     vertex_weight.push_back(liberty_cell->area());
   }
-  int num_fixed_vertices = vertex_id;  // we set these fixed vertices to part0
+  int num_fixed_vertices = vertex_id;  // we do not consider these vertices in later process
+                                       // They behaves like ''fixed vertices''
   for (auto& std_cell : std_cells) {
     inst_vertex_id_map[std_cell] = vertex_id++;
     const sta::LibertyCell* liberty_cell = network_->libertyCell(std_cell);
     vertex_weight.push_back(liberty_cell->area());
   }
-
-  // Traverse nets to create edges (col_idx, row_ptr)
-  row_ptr.push_back(col_idx.size());
+  // Traverse nets to create hyperedges
   for (odb::dbNet* net : block_->getNets()) {
     // ignore all the power net
     if (net->getSigType().isSupply()) {
@@ -1875,57 +1871,24 @@ void HierRTLMP::breakLargeFlatCluster(Cluster* parent)
     // add the net as a hyperedge
     if (driver_id != -1 && loads_id.size() > 0
         && loads_id.size() < large_net_threshold_) {
-      col_idx.push_back(driver_id);
-      col_idx.insert(col_idx.end(), loads_id.begin(), loads_id.end());
-      row_ptr.push_back(col_idx.size());
+      std::vector<int> hyperedge { driver_id };
+      hyperedge.insert(hyperedge.end(), loads_id.begin(), loads_id.end());
+      hyperedges.push_back(hyperedge);
     }
   }
 
-  // we do not specify any weight for vertices or hyperedges
-  // std::vector<float> vertex_weight(num_vertices, 1.0);
-  std::vector<float> edge_weight(row_ptr.size() - 1, 1.0);
+  const int seed = 0;
+  const float balance_constraint = 5.0;
+  const int num_vertices = vertex_weight.size();
+  const int num_hyperedges = hyperedges.size();
 
-  // MLPart only support 2-way partition
-  const int npart = 2;
-  double balanceArray[2] = {0.5, 0.5};
-  double tolerance = 0.05;
-  unsigned int seed = 0;
-
-  const int num_vertice = vertex_weight.size();
-  const int num_edge = row_ptr.size() - 1;
-  const int num_col_idx = col_idx.size();
-  double* vertexWeight
-      = (double*) malloc((unsigned) num_vertice * sizeof(double));
-  int* rowPtr = (int*) malloc((unsigned) (num_edge + 1) * sizeof(int));
-  int* colIdx = (int*) malloc((unsigned) (num_col_idx) * sizeof(int));
-  double* edgeWeight = (double*) malloc((unsigned) num_edge * sizeof(double));
-  int* part = (int*) malloc((unsigned) num_vertice * sizeof(int));
-  for (int i = 0; i < num_vertice; i++) {
-    part[i] = -1;
-    vertexWeight[i] = 1.0;
-  }
-  for (int i = 0; i < num_edge; i++) {
-    edgeWeight[i] = 1.0;
-    rowPtr[i] = row_ptr[i];
-  }
-  rowPtr[num_edge] = row_ptr[num_edge];
-  for (int i = 0; i < num_col_idx; i++)
-    colIdx[i] = col_idx[i];
-
-  UMpack_mlpart(num_vertice,
-                num_edge,
-                vertexWeight,
-                rowPtr,
-                colIdx,
-                edgeWeight,
-                npart,  // Number of Partitions
-                balanceArray,
-                tolerance,
-                part,
-                1,  // Starts Per Run #TODO: add a tcl command
-                1,  // Number of Runs
-                0,  // Debug Level
-                seed);
+  std::vector<int> part = tritonpart_->TritonPart2Way(
+       num_vertices,
+       num_hyperedges,
+       hyperedges,
+       vertex_weight,
+       balance_constraint,
+       seed);
 
   // create cluster based on partitioning solutions
   // Note that all the std cells are stored in the leaf_std_cells_ for a flat
@@ -2303,9 +2266,9 @@ void HierRTLMP::calClusterMacroTilings(Cluster* parent)
   // Here we use the floorplan size as the outline constraint
   const float outline_width = root_cluster_->getWidth();
   const float outline_height = root_cluster_->getHeight();
-  const int num_perturb_per_step = (macros.size() > num_perturb_per_step_ / 5)
+  const int num_perturb_per_step = (macros.size() > num_perturb_per_step_ / 10)
                                        ? macros.size()
-                                       : num_perturb_per_step_ / 5;
+                                       : num_perturb_per_step_ / 10;
   std::vector<SACoreSoftMacro*> sa_containers;
   // we vary the outline of parent cluster to generate different tilings
   // we first vary the outline width while keeping outline height fixed
@@ -2524,13 +2487,13 @@ void HierRTLMP::calHardMacroClusterShape(Cluster* cluster)
   for (auto& macro : hard_macros) {
     macros.push_back(*macro);
   }
-  int num_perturb_per_step = (macros.size() > num_perturb_per_step_ / 5)
+  int num_perturb_per_step = (macros.size() > num_perturb_per_step_ / 10)
                                  ? macros.size()
-                                 : num_perturb_per_step_ / 5;
+                                 : num_perturb_per_step_ / 10;
   if (cluster->getParent() == nullptr) {
-    num_perturb_per_step = (macros.size() > num_perturb_per_step_ / 2)
+    num_perturb_per_step = (macros.size() > num_perturb_per_step_ / 5)
                                ? macros.size()
-                               : num_perturb_per_step_ / 2;
+                               : num_perturb_per_step_ / 5;
   }
 
   std::vector<SACoreHardMacro*> sa_containers;
@@ -4003,9 +3966,9 @@ void HierRTLMP::hardMacroClusterMacroPlacement(Cluster* cluster)
     vary_factor_list.push_back(1.0 + i * vary_step);
     vary_factor_list.push_back(1.0 - i * vary_step);
   }
-  const int num_perturb_per_step = (macros.size() > num_perturb_per_step_ / 2)
+  const int num_perturb_per_step = (macros.size() > num_perturb_per_step_ / 10)
                                        ? macros.size()
-                                       : num_perturb_per_step_ / 2;
+                                       : num_perturb_per_step_ / 10;
   int run_thread = num_threads_;
   int remaining_runs = num_runs_;
   int run_id = 0;
