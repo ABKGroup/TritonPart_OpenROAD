@@ -58,7 +58,8 @@ namespace par {
 struct TimingPath {
   std::vector<int> path;  // a list of vertex id -> path-based method
   std::vector<int> arcs;  // a list of hyperedge id -> net-based method
-  float slack = 0.0;      // slack for this critical timing paths (normalized to clock period)
+  float slack = 0.0;      // slack for this critical timing paths
+  float clock_period = 1.0; // clock period for this critical timing paths
 };
 
 // T is the type for vertex properties (float or int)

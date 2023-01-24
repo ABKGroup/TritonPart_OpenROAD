@@ -35,8 +35,6 @@
 
 include("openroad")
 
-option(LOAD_PARTITIONERS "Load GPMetis and Chaco" OFF)
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MODULE_PATH               "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -49,11 +47,6 @@ find_package(Threads REQUIRED)
 find_package(ortools REQUIRED)
 include_directories(SYSTEM ${CPLEX_INCLUDE_DIRS})
 
-
-if (LOAD_PARTITIONERS)
-    set(PATH_PARTITIONERS ${CMAKE_CURRENT_SOURCE_DIR} CACHE PATH "Path to Partitioners Folder")
-    message(STATUS "Using partitioners")
-endif (LOAD_PARTITIONERS)
 
 swig_lib(NAME      par
          NAMESPACE par
@@ -84,42 +77,6 @@ messages(
   TARGET par
 )
 
-if (LOAD_PARTITIONERS)
-  target_compile_definitions(par
-    PRIVATE
-      PARTITIONERS
-  )
-  target_include_directories(par
-    PRIVATE
-      ${PATH_PARTITIONERS}/Partitioners/Chaco/code
-      ${PATH_PARTITIONERS}/Partitioners/Metis/include
-  )
-
-  find_library(CHACO NAMES Chaco
-          PATHS ${PATH_PARTITIONERS}/Partitioners
-          PATH_SUFFIXES build/Chaco/code)
-
-  if (NOT CHACO)
-          add_subdirectory(${PATH_PARTITIONERS}/Partitioners/Chaco/code Chaco/code)
-          set(CHACO Chaco)
-  endif()
-
-  find_library(METIS NAMES metis
-          PATHS ${PATH_PARTITIONERS}/Partitioners
-          PATH_SUFFIXES build/Metis build/Metis/libmetis)
-
-  if (NOT METIS)
-          add_subdirectory(${PATH_PARTITIONERS}/Partitioners/Metis Metis)
-          set(METIS metis)
-  endif()
-
-  target_link_libraries(par
-    PUBLIC
-      ${CHACO}
-      ${METIS}
-  )
-endif (LOAD_PARTITIONERS)
-
 target_include_directories(par
   PUBLIC
     include
@@ -137,8 +94,6 @@ target_link_libraries(par
     ${CMAKE_THREAD_LIBS_INIT}
     dl
 )
-
-unset(LOAD_PARTITIONERS)
 
 if (Python3_FOUND AND BUILD_PYTHON)
   swig_lib(NAME          par_py
