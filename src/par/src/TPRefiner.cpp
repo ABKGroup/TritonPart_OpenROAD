@@ -34,13 +34,25 @@
 ///////////////////////////////////////////////////////////////////////////////
 #include "TPRefiner.h"
 
+#include <ortools/base/commandlineflags.h>
+
 #include "TPHypergraph.h"
 #include "Utilities.h"
 #include "ilcplex/cplex.h"
 #include "ilcplex/ilocplex.h"
+//#include <ortools/base/init_google.h>
+#include <ortools/base/logging.h>
+#include <ortools/linear_solver/linear_solver.h>
+#include <ortools/linear_solver/linear_solver.pb.h>
+
 #include "utl/Logger.h"
 
 namespace par {
+
+using operations_research::MPConstraint;
+using operations_research::MPObjective;
+using operations_research::MPSolver;
+using operations_research::MPVariable;
 
 matrix<int> TPrefiner::GetNetDegrees(const HGraph hgraph,
                                      TP_partition& solution)
@@ -83,6 +95,7 @@ std::vector<int> TPrefiner::FindBoundaryVertices(
       }
     }
   }
+
   std::vector<int> boundary_vertices(boundary_set.begin(), boundary_set.end());
   return boundary_vertices;
 }
@@ -91,7 +104,8 @@ void TPrefiner::FindNeighbors(const HGraph hgraph,
                               int& vertex,
                               std::pair<int, int>& partition_pair,
                               TP_partition& solution,
-                              std::set<int>& neighbors)
+                              std::set<int>& neighbors,
+                              bool k_flag)
 {
   const int first_valid_entry = hgraph->vptr_[vertex];
   const int first_invalid_entry = hgraph->vptr_[vertex + 1];
@@ -101,12 +115,19 @@ void TPrefiner::FindNeighbors(const HGraph hgraph,
     const int first_invalid_entry_he = hgraph->eptr_[he + 1];
     for (int j = first_valid_entry_he; j < first_invalid_entry_he; ++j) {
       const int v = hgraph->eind_[j];
-      if (v == vertex || GetVisitStatus(v) == true
-          || (solution[v] != partition_pair.first
-              && solution[v] != partition_pair.second)) {
-        continue;
+      if (k_flag == false) {
+        if (v == vertex || GetVisitStatus(v) == true
+            || (solution[v] != partition_pair.first
+                && solution[v] != partition_pair.second)) {
+          continue;
+        }
+        neighbors.insert(v);
+      } else {
+        if (v == vertex || GetVisitStatus(v) == true) {
+          continue;
+        }
+        neighbors.insert(v);
       }
-      neighbors.insert(v);
     }
   }
 }
@@ -115,24 +136,60 @@ TP_partition_token TPrefiner::CutEvaluator(const HGraph hgraph,
                                            std::vector<int>& solution)
 {
   matrix<float> block_balance = GetBlockBalance(hgraph, solution);
-  float cost = 0.0;
+  float edge_cost = 0.0;
+  float timing_cost = 0.0;
   // check the cutsize
   for (int e = 0; e < hgraph->num_hyperedges_; ++e) {
     for (int idx = hgraph->eptr_[e] + 1; idx < hgraph->eptr_[e + 1]; ++idx) {
       if (solution[hgraph->eind_[idx]] != solution[hgraph->eind_[idx - 1]]) {
-        cost += std::inner_product(hgraph->hyperedge_weights_[e].begin(),
-                                   hgraph->hyperedge_weights_[e].end(),
-                                   e_wt_factors_.begin(),
-                                   0.0);
+        edge_cost += std::inner_product(hgraph->hyperedge_weights_[e].begin(),
+                                        hgraph->hyperedge_weights_[e].end(),
+                                        e_wt_factors_.begin(),
+                                        0.0);
         break;  // this net has been cut
       }
     }  // finish hyperedge e
   }
+
   // check timing paths
-  for (int path_id = 0; path_id < hgraph->num_timing_paths_; path_id++)
-    cost += CalculatePathCost(path_id, hgraph, solution);
+  for (int path_id = 0; path_id < hgraph->num_timing_paths_; path_id++) {
+    timing_cost = CalculatePathCost(path_id, hgraph, solution);
+  }
+  float edge_cost_factor = 1.0;
+  float timing_cost_factor = 1.0;
+  float cost = edge_cost_factor * edge_cost + timing_cost_factor * timing_cost;
 
   return std::pair<float, std::vector<std::vector<float>>>(cost, block_balance);
+}
+
+std::pair<int, int> TPrefiner::GetTimingCuts(const HGraph hgraph,
+                                             std::vector<int>& solution)
+{
+  int total_cuts = 0;
+  int total_critical_paths_cut = 0;
+  int worst_cut = -std::numeric_limits<int>::max();
+  for (int i = 0; i < hgraph->num_timing_paths_; ++i) {
+    const int first_valid_entry = hgraph->vptr_p_[i];
+    const int first_invalid_entry = hgraph->vptr_p_[i + 1];
+    std::vector<int> block_path;
+    for (int j = first_valid_entry; j < first_invalid_entry; ++j) {
+      int v = hgraph->vind_p_[j];
+      int block_id = solution[v];
+      if (block_path.size() == 0 || block_path.back() != block_id) {
+        block_path.push_back(block_id);
+      }
+    }
+    int cut_on_path = block_path.size() - 1;
+    total_cuts += cut_on_path;
+    if (cut_on_path > worst_cut) {
+      worst_cut = cut_on_path;
+    }
+    if (cut_on_path > 0) {
+      ++total_critical_paths_cut;
+    }
+  }
+  float average_cuts_on_path = total_cuts / hgraph->num_timing_paths_;
+  return std::make_pair(total_critical_paths_cut, worst_cut);
 }
 
 // Get block balance
@@ -166,10 +223,15 @@ float TPrefiner::CalculatePathCost(int path_id,
 
   std::vector<int> path;             // represent the path in terms of block_id
   std::map<int, int> block_counter;  // block_id counter
-  for (auto idx = hgraph->vptr_p_[path_id]; idx < hgraph->vptr_p_[path_id];
+  int block_id;
+  for (auto idx = hgraph->vptr_p_[path_id]; idx < hgraph->vptr_p_[path_id + 1];
        ++idx) {
     const int u = hgraph->vind_p_[idx];  // current vertex
-    const int block_id = (u == v) ? to_pid : solution[u];
+    if (to_pid == -1) {
+      block_id = solution[u];
+    } else {
+      block_id = (u == v) ? to_pid : solution[u];
+    }
     if (path.size() == 0 || path.back() != block_id) {
       path.push_back(block_id);
       if (block_counter.find(block_id) != block_counter.end())
@@ -179,17 +241,26 @@ float TPrefiner::CalculatePathCost(int path_id,
     }
   }
 
-  if (path.size() <= 1)
+  if (path.size() <= 1) {
     return cost;
+  }
 
-  // num_cut = path.size() - 1
-  cost = path_wt_factor_ * static_cast<float>(path.size() - 1);
+  // check how many times the path is being cut by the partition
+  /*cost = path_wt_factor_ * static_cast<float>(path.size() - 1)
+   * hgraph->timing_attr_[path_id];*/
+
+  cost = path_wt_factor_
+         * std::pow(hgraph->timing_attr_[path_id],
+                    2.0 * static_cast<float>(path.size() - 1));
+  // cost = path_wt_factor_ * static_cast<float>(path.size() - 1);
+
   // get the snaking factor of the path (maximum repetition of block_id - 1)
   int snaking_factor = 0;
   for (auto [block_id, count] : block_counter)
     if (count > snaking_factor)
       snaking_factor = count;
   cost += snaking_wt_factor_ * static_cast<float>(snaking_factor - 1);
+
   return cost;
 }
 
@@ -209,6 +280,155 @@ bool TPrefiner::CheckBoundaryVertex(const HGraph hgraph,
   return false;
 }
 
+int TPrefiner::GetPathCuts(int pathid,
+                           const HGraph hgraph,
+                           std::vector<int>& solution)
+{
+  std::vector<int> path;             // represent the path in terms of block_id
+  std::map<int, int> block_counter;  // block_id counter
+  for (auto idx = hgraph->vptr_p_[pathid]; idx < hgraph->vptr_p_[pathid + 1];
+       ++idx) {
+    const int u = hgraph->vind_p_[idx];  // current vertex
+    const int block_id = solution[u];
+    if (path.size() == 0 || path.back() != block_id) {
+      path.push_back(block_id);
+      if (block_counter.find(block_id) != block_counter.end())
+        block_counter[block_id] += 1;
+      else
+        block_counter[block_id] = 1;
+    }
+  }
+  return path.size() - 1;
+}
+
+void TPrefiner::UpdateNeighboringPaths(
+    const std::pair<int, int>& partition_pair,
+    const std::set<int>& neighbors,
+    const HGraph hgraph,
+    const TP_partition& solution,
+    std::vector<float>& paths_cost)
+{
+  if (hgraph->num_timing_paths_ > 0) {
+    std::set<int> neighboring_paths;
+    for (auto& v : neighbors) {
+      const int first_valid_entry = hgraph->pptr_v_[v];
+      const int first_invalid_entry = hgraph->pptr_v_[v + 1];
+      for (int i = first_valid_entry; i < first_invalid_entry; ++i) {
+        int path = hgraph->pind_v_[i];
+        neighboring_paths.insert(path);
+      }
+    }
+    for (auto& path : neighboring_paths) {
+      paths_cost[path] = CalculatePathCost(path, hgraph, solution);
+    }
+  }
+}
+
+// Generate paths as edges
+void TPrefiner::GeneratePathsAsEdges(const HGraph hgraph)
+{
+  paths_.resize(hgraph->num_timing_paths_);
+  for (int i = 0; i < hgraph->num_timing_paths_; ++i) {
+    const int first_valid_entry = hgraph->vptr_p_[i];
+    const int first_invalid_entry = hgraph->vptr_p_[i + 1];
+    std::set<int> path_hyperedges;
+    std::map<int, int> path_edges;
+    for (int j = first_valid_entry; j < first_invalid_entry; ++j) {
+      const int v = hgraph->vind_p_[j];
+      const int first_valid_entry_he = hgraph->vptr_[v];
+      const int first_invalid_entry_he = hgraph->vptr_[v + 1];
+      for (int k = first_valid_entry_he; k < first_invalid_entry_he; ++k) {
+        int he = hgraph->vind_[k];
+        path_hyperedges.insert(he);
+      }
+    }
+    std::vector<int> hes(path_hyperedges.begin(), path_hyperedges.end());
+    paths_[i] = hes;
+  }
+}
+
+inline void TPrefiner::InitPathCuts(const HGraph hgraph,
+                                    std::vector<int>& path_cuts,
+                                    std::vector<int>& solution)
+{
+  for (int i = 0; i < hgraph->timing_attr_.size(); ++i) {
+    path_cuts[i] = GetPathCuts(i, hgraph, solution);
+  }
+}
+
+inline void TPrefiner::InitPaths(const HGraph hgraph,
+                                 std::vector<float>& path_cost,
+                                 std::vector<int>& solution)
+{
+  // rescale hyperedge weights to original weights so that these get
+  // recalculated according to cuts on path graphs
+  for (int i = 0; i < hgraph->timing_attr_.size(); ++i) {
+    ReweighTimingWeights(i, hgraph, solution, path_cost);
+  }
+}
+
+// Check if the path cost has changed in the past iteration
+void TPrefiner::ReweighTimingWeights(int path_id,
+                                     const HGraph hgraph,
+                                     std::vector<int>& solution,
+                                     std::vector<float>& path_cost)
+{
+  if (hgraph->num_timing_paths_ == 0)
+    return;  // no timing paths
+
+  // If the slack on the path is positive, then it is not critical and won't be
+  // considered in our cost calculations
+  if (hgraph->timing_attr_[path_id] < 1.0) {
+    return;
+  }
+
+  std::vector<int> path;             // represent the path in terms of block_id
+  std::map<int, int> block_counter;  // block_id counter
+  for (auto idx = hgraph->vptr_p_[path_id]; idx < hgraph->vptr_p_[path_id + 1];
+       ++idx) {
+    const int u = hgraph->vind_p_[idx];  // current vertex
+    const int block_id = solution[u];
+    if (path.size() == 0 || path.back() != block_id) {
+      path.push_back(block_id);
+      if (block_counter.find(block_id) != block_counter.end())
+        block_counter[block_id] += 1;
+      else
+        block_counter[block_id] = 1;
+    }
+  }
+  // This path is cut again
+  // On further cutting the timing critical path the edges lying along the path
+  // should be reweighed with more delta weights
+  if (path.size() > 1) {
+    // check how many times the path is being cut by the partition
+    // and recalculate the weight on the path
+    // path_cost = path_cost_factor * modified_slack * number_of_cuts_on_path
+    /*float cost = path_wt_factor_ * hgraph->timing_attr_[path_id]
+     * static_cast<float>(path.size() - 1);*/
+    float cost = path_wt_factor_
+                 * std::pow(hgraph->timing_attr_[path_id],
+                            2.0 * static_cast<float>(path.size() - 1));
+    if (cost > 1.0) {
+      // Each hyperedge weights will get updated based on whether it is cut or
+      // not
+      std::vector<float> cost_vector(hgraph->hyperedge_dimensions_, cost);
+      /*for (auto& he : paths_[path_id]) {
+        // account for path sharing
+        hgraph->hyperedge_weights_[he]
+            = hgraph->hyperedge_weights_[he] + cost_vector;
+      }*/
+    }
+
+    // get the snaking factor of the path (maximum repetition of block_id - 1)
+    int snaking_factor = 0;
+    for (auto [block_id, count] : block_counter)
+      if (count > snaking_factor)
+        snaking_factor = count;
+    cost += snaking_wt_factor_ * static_cast<float>(snaking_factor - 1);
+    path_cost[path_id] = cost;
+  }
+}
+
 TP_gain_cell TPrefiner::CalculateGain(int v,
                                       int from_pid,
                                       int to_pid,
@@ -217,10 +437,11 @@ TP_gain_cell TPrefiner::CalculateGain(int v,
                                       const std::vector<float>& cur_path_cost,
                                       const matrix<int>& net_degs)
 {
-  float score = 0.0;
+  float cut_score = 0.0;
+  float timing_score = 0.0;
   std::map<int, float> path_cost;  // map path_id to latest score
   if (from_pid == to_pid)
-    return std::shared_ptr<VertexGain>(new VertexGain(v, score, path_cost));
+    return std::shared_ptr<VertexGain>(new VertexGain(v, 0.0, path_cost));
   // define two lamda function
   // 1) for checking connectivity
   // 2) for calculating the score of a hyperedge
@@ -234,6 +455,10 @@ TP_gain_cell TPrefiner::CalculateGain(int v,
   };
   // function : calculate the score for the hyperedge
   auto GetHyperedgeScore = [&](int e) {
+    /*return std::inner_product(hgraph->hyperedge_weights_[e].begin(),
+                              hgraph->hyperedge_weights_[e].end(),
+                              e_wt_factors_.begin(),
+                              0.0);*/
     return std::inner_product(hgraph->hyperedge_weights_[e].begin(),
                               hgraph->hyperedge_weights_[e].end(),
                               e_wt_factors_.begin(),
@@ -252,24 +477,30 @@ TP_gain_cell TPrefiner::CalculateGain(int v,
     }
     if (connectivity == 1
         && net_degs[e][from_pid]
-               > 1) {  // move from_pid to to_pid will have negative socre
-      score -= e_score;
+               > 1) {  // move from_pid to to_pid will have negative score
+      cut_score -= e_score;
     } else if (connectivity == 2 && net_degs[e][from_pid] == 1
                && net_degs[e][to_pid] > 0) {
-      score += e_score;  // after move, all the vertices in to_pid
+      cut_score += e_score;
     }
   }
   // check the timing path
   if (hgraph->num_timing_paths_ > 0) {
     for (auto p_idx = hgraph->pptr_v_[v]; p_idx < hgraph->pptr_v_[v + 1];
-         p_idx++) {
+         ++p_idx) {
       const int path_id = hgraph->pind_v_[p_idx];
+      // Get updated path costs if vertex is moved to a different partition
       const float cost
           = CalculatePathCost(path_id, hgraph, solution, v, to_pid);
-      path_cost[path_id] = cost;
-      score += cur_path_cost[path_id] - cost;
+      // gain accomodates for the change in the cost of the timing path
+      timing_score += (cur_path_cost[path_id] - cost);
     }
   }
+  float cut_cost_factor = 1.0;
+  float timing_cost_factor = 1.0;
+  float score = cut_cost_factor * cut_score + timing_cost_factor * timing_score;
+  // std::cout << "[debug] scores " << cut_score << " and " << timing_score <<
+  // std::endl;
   return std::shared_ptr<VertexGain>(
       new VertexGain(v, score, solution[v], path_cost));
 }
@@ -401,6 +632,8 @@ void TPtwoWayFM::Refine(const HGraph hgraph,
   }
   float gain_in_pass = -1;
   matrix<float> max_block_balance_tol = max_block_balance;
+  std::vector<float> paths_cost(hgraph->num_timing_paths_, 0.0);
+  GeneratePathsAsEdges(hgraph);
   for (int i = 0; i < refiner_iters_; ++i) {
     if (i == 1) {
       SetTolerance(0.25);
@@ -411,7 +644,9 @@ void TPtwoWayFM::Refine(const HGraph hgraph,
       SetTolerance(0.0);
       max_block_balance_tol = max_block_balance;
     }
-    gain_in_pass = Pass(hgraph, max_block_balance, solution);
+    InitPaths(hgraph, paths_cost, solution);
+    gain_in_pass = Pass(hgraph, max_block_balance, solution, paths_cost);
+    hgraph->hyperedge_weights_ = hgraph->nonscaled_hyperedge_weights_;
   }
 }
 
@@ -438,9 +673,6 @@ std::shared_ptr<VertexGain> TPtwoWayFM::FindMovableVertex(
     int right_child = parent * 2 + 2;
     bool left = false;
     bool right = false;
-    /*std::cout << "[debug] pass, left child, right child, total eles " << pass
-              << ", " << left_child << ", " << right_child << ", "
-              << total_elements << std::endl;*/
     // If left child is within bounds of PQ
     if (left_child < total_elements) {
       left = true;
@@ -610,8 +842,6 @@ std::shared_ptr<VertexGain> TPtwoWayFM::PickMoveTwoWay(
     }
   } else if (buckets[0]->GetStatus() == true
              && buckets[1]->GetStatus() == true) {
-    /*std::cout << "[debug] flag 2: " << buckets[0]->GetSizeOfPQ() << ", "
-              << buckets[1]->GetSizeOfPQ() << std::endl;*/
     auto ele_0 = buckets[0]->GetMax();
     bool legality_of_move_0 = CheckLegality(
         hgraph, 0, ele_0, curr_block_balance, max_block_balance);
@@ -634,7 +864,6 @@ std::shared_ptr<VertexGain> TPtwoWayFM::PickMoveTwoWay(
           corking_part, hgraph, buckets, curr_block_balance, max_block_balance);
     }
   } else {
-    // std::cout << "[debug] flag 3" << std::endl;
     return dummy_cell;
   }
 }
@@ -649,6 +878,7 @@ void TPtwoWayFM::UpdateNeighbors(const HGraph hgraph,
 {
   int from_part = partition_pair.first;
   int to_part = partition_pair.second;
+  std::set<int> neighboring_hyperedges;
   // After moving a vertex, loop through all neighbors of that vertex
   for (const int& v : neighbors) {
     int nbr_part = solution[v];
@@ -657,6 +887,14 @@ void TPtwoWayFM::UpdateNeighbors(const HGraph hgraph,
     }
     if (GetVisitStatus(v) == true) {
       continue;
+    }
+    if (hgraph->num_timing_paths_ > 0) {
+      const int first_valid_entry = hgraph->vptr_[v];
+      const int first_invalid_entry = hgraph->vptr_[v + 1];
+      for (int i = first_valid_entry; i < first_invalid_entry; ++i) {
+        int he = hgraph->vind_[i];
+        neighboring_hyperedges.insert(he);
+      }
     }
     float delta_change = 0.0;
     int nbr_from_part = nbr_part == from_part ? from_part : to_part;
@@ -797,10 +1035,12 @@ void TPtwoWayFM::AcceptTwoWayMove(std::shared_ptr<VertexGain> gain_cell,
 
 float TPtwoWayFM::Pass(const HGraph hgraph,
                        const matrix<float>& max_block_balance,
-                       TP_partition& solution)
+                       TP_partition& solution,
+                       std::vector<float>& paths_cost)
 {
-  std::vector<float> paths_cost;
-  paths_cost.resize(hgraph->num_timing_paths_);
+  /*std::vector<float> paths_cost;
+  paths_cost.resize(hgraph->num_timing_paths_);*/
+  // std::vector<int> path_cuts;
   for (int path_id = 0; path_id < hgraph->num_timing_paths_; path_id++) {
     paths_cost[path_id] = CalculatePathCost(path_id, hgraph, solution);
   }
@@ -841,8 +1081,8 @@ float TPtwoWayFM::Pass(const HGraph hgraph,
   auto partition_pair = std::make_pair(0, 1);
   std::vector<int> boundary_vertices
       = FindBoundaryVertices(hgraph, net_degs, partition_pair);
-  // std::vector<int> boundary_vertices(hgraph->num_vertices_);
-  // std::iota(boundary_vertices.begin(), boundary_vertices.end(), 0);
+  /*std::vector<int> boundary_vertices(hgraph->num_vertices_);
+  std::iota(boundary_vertices.begin(), boundary_vertices.end(), 0);*/
   InitGainBucketsTwoWay(
       hgraph, solution, net_degs, boundary_vertices, paths_cost, buckets);
   // Moves begin
@@ -857,16 +1097,6 @@ float TPtwoWayFM::Pass(const HGraph hgraph,
   for (int i = 0; i < hgraph->num_vertices_; ++i) {
     auto ele
         = PickMoveTwoWay(hgraph, buckets, block_balance, max_block_balance);
-
-    /*int from_part = max_block_balance[0] - block_balance[0]
-                            < max_block_balance[1] - block_balance[1]
-                        ? 0
-                        : 1;
-    int to_part = (from_part + 1) % 2;
-    if (buckets[to_part]->GetSizeOfPQ() == 0) {
-      break;
-    }
-    auto ele = buckets[to_part]->GetMax();*/
     if (ele->GetStatus() == false) {
       break;
     }
@@ -886,7 +1116,9 @@ float TPtwoWayFM::Pass(const HGraph hgraph,
                      buckets,
                      net_degs);
     std::set<int> neighbors;
-    FindNeighbors(hgraph, vertex, partition_pair, solution, neighbors);
+    FindNeighbors(hgraph, vertex, partition_pair, solution, neighbors, false);
+    UpdateNeighboringPaths(
+        partition_pair, neighbors, hgraph, solution, paths_cost);
     UpdateNeighbors(hgraph,
                     partition_pair,
                     neighbors,
@@ -913,7 +1145,11 @@ float TPtwoWayFM::Pass(const HGraph hgraph,
                   paths_cost,
                   solution);
   }
-  // std::cout << "[debug] cutsize post refinement " << min_cut << std::endl;
+
+  /*if (best_move > 0) {
+    ReweighHyperedges();
+  }*/
+
   return total_delta_gain;
 }
 
@@ -979,10 +1215,10 @@ void TPtwoWayFM::BalancePartition(const HGraph hgraph,
       }
     }
   }
-  std::vector<float> paths_cost;
-  paths_cost.reserve(hgraph->num_timing_paths_);
+  std::vector<float> paths_cost(hgraph->num_timing_paths_, 0.0);
   for (int path_id = 0; path_id < hgraph->num_timing_paths_; path_id++) {
-    paths_cost.push_back(CalculatePathCost(path_id, hgraph, solution));
+    ReweighTimingWeights(path_id, hgraph, solution, paths_cost);
+    // paths_cost.push_back(CalculatePathCost(path_id, hgraph, solution));
   }
   TP_gain_buckets buckets;
   for (int i = 0; i < num_parts_; ++i) {
@@ -1029,7 +1265,7 @@ void TPtwoWayFM::BalancePartition(const HGraph hgraph,
                      buckets,
                      net_degs);
     std::set<int> neighbors;
-    FindNeighbors(hgraph, vertex, partition_pair, solution, neighbors);
+    FindNeighbors(hgraph, vertex, partition_pair, solution, neighbors, false);
     UpdateNeighbors(hgraph,
                     partition_pair,
                     neighbors,
@@ -1042,6 +1278,548 @@ void TPtwoWayFM::BalancePartition(const HGraph hgraph,
     }
   }
 }
+
+// Flat K-way FM implementation starts here
+
+void TPkWayFM::InitializeSingleGainBucket(
+    TP_gain_buckets& buckets,
+    int to_pid,
+    const std::vector<int>& boundary_vertices,
+    const HGraph hgraph,
+    const TP_partition& solution,
+    const std::vector<float>& cur_path_cost,
+    const matrix<int>& net_degs)
+{
+  buckets[to_pid]->SetActive();
+  assert(buckets[to_pid]->GetActive() == true);
+  for (const int& v : boundary_vertices) {
+    if (GetBoundaryStatus(v) == false) {
+      MarkBoundary(v);
+    }
+    if (GetVisitStatus(v) == true) {
+      ResetVisited(v);
+    }
+    const int from_part = solution[v];
+    auto gain_cell = CalculateGain(
+        v, from_part, to_pid, hgraph, solution, cur_path_cost, net_degs);
+    buckets[to_pid]->InsertIntoPQ(gain_cell);
+  }
+  if (buckets[to_pid]->GetTotalElements() == 0) {
+    buckets[to_pid]->SetDeactive();
+  }
+}
+
+void TPkWayFM::InitializeGainBucketsKWay(
+    const HGraph hgraph,
+    const TP_partition& solution,
+    const matrix<int>& net_degs,
+    const std::vector<int>& boundary_vertices,
+    const std::vector<float>& cur_path_cost,
+    TP_gain_buckets& buckets)
+{
+  std::vector<std::thread> threads;  // for parallel updating
+  // parallel initialize the num_parts gain_buckets
+  for (int to_pid = 0; to_pid < num_parts_; to_pid++)
+    threads.push_back(std::thread(&TPkWayFM::InitializeSingleGainBucket,
+                                  this,
+                                  std::ref(buckets),
+                                  to_pid,
+                                  boundary_vertices,
+                                  hgraph,
+                                  solution,
+                                  cur_path_cost,
+                                  net_degs));
+  for (auto& t : threads)
+    t.join();  // wait for all threads to finish
+  threads.clear();
+}
+
+void TPkWayFM::Refine(const HGraph hgraph,
+                      const matrix<float>& max_block_balance,
+                      TP_partition& solution)
+{
+  float gain_in_pass;
+  GeneratePathsAsEdges(hgraph);
+  // std::vector<int> path_cuts(hgraph->num_timing_paths_, 0);
+  std::vector<float> paths_cost(hgraph->num_timing_paths_, 0.0);
+  GeneratePathsAsEdges(hgraph);
+  // InitPathCuts(hgraph, path_cuts, solution);
+  for (int i = 0; i < refiner_iters_; ++i) {
+    InitPaths(hgraph, paths_cost, solution);
+    gain_in_pass = Pass(hgraph, max_block_balance, solution, paths_cost);
+    hgraph->hyperedge_weights_ = hgraph->nonscaled_hyperedge_weights_;
+  }
+  // hgraph->hyperedge_weights_ = hgraph->nonscaled_hyperedge_weights_;
+}
+
+void TPkWayFM::RollbackMovesKWay(std::vector<VertexGain>& trace,
+                                 matrix<int>& net_degs,
+                                 int& best_move,
+                                 float& total_delta_gain,
+                                 HGraph hgraph,
+                                 matrix<float>& curr_block_balance,
+                                 std::vector<float>& cur_path_cost,
+                                 std::vector<int>& solution,
+                                 std::vector<int>& partition_trace)
+{
+  if (trace.size() == 0) {
+    return;
+  }
+  if (best_move == trace.size() - 1) {
+    return;
+  }
+  int idx = trace.size() - 1;
+  while (true) {
+    // Grab vertex cell from back of the move trace
+    auto vertex_cell = trace.back();
+    const int vertex = vertex_cell.GetVertex();
+    const int source_part = solution[vertex];
+    const int dest_part = partition_trace.back();
+    const float gain = vertex_cell.GetGain();
+    // Deduct gain from tot_delta_gain
+    total_delta_gain -= gain;
+    assert(dest_part == solution[vertex_id]);
+    // Flip the partition of the vertex to its previous part id
+    solution[vertex] = dest_part;
+    // Update the balance
+    curr_block_balance[dest_part]
+        = curr_block_balance[dest_part] + hgraph->vertex_weights_[vertex];
+    curr_block_balance[source_part]
+        = curr_block_balance[source_part] - hgraph->vertex_weights_[vertex];
+    // Update the net degs and collect neighbors
+    std::set<int> neighbors;
+    const int first_valid_entry_he = hgraph->vptr_[vertex];
+    const int first_invalid_entry_he = hgraph->vptr_[vertex + 1];
+    for (int i = first_valid_entry_he; i < first_invalid_entry_he; ++i) {
+      const int he = hgraph->vind_[i];
+      // Updating the net degs here
+      ++net_degs[he][dest_part];
+      --net_degs[he][source_part];
+      // Looping to collect neighbors
+    }
+    trace.pop_back();
+    partition_trace.pop_back();
+    --idx;
+    // Update the trace
+    if (idx == best_move) {
+      break;
+    }
+  }
+}
+
+void TPkWayFM::UpdateSingleGainBucket(int part,
+                                      const std::set<int>& neighbors,
+                                      TP_gain_buckets& buckets,
+                                      const HGraph hgraph,
+                                      const TP_partition& solution,
+                                      const std::vector<float>& cur_path_cost,
+                                      const matrix<int>& net_degs)
+{
+  std::set<int> neighboring_hyperedges;
+  for (const int& v : neighbors) {
+    int from_part = solution[v];
+    if (from_part == part) {
+      continue;
+    }
+    if (GetVisitStatus(v) == true) {
+      continue;
+    }
+    /*if (hgraph->num_timing_paths_ > 0) {
+      const int first_valid_entry = hgraph->vptr_[v];
+      const int first_invalid_entry = hgraph->vptr_[v + 1];
+      for (int i = first_valid_entry; i < first_invalid_entry; ++i) {
+        int he = hgraph->vind_[i];
+        neighboring_hyperedges.push_back(he);
+      }
+    }*/
+    std::pair<int, int> partition_pair = std::make_pair(from_part, part);
+    if (buckets[part]->CheckIfVertexExists(v) == true) {
+      auto new_gain_cell = CalculateGain(
+          v, from_part, part, hgraph, solution, cur_path_cost, net_degs);
+      float new_gain = new_gain_cell->GetGain();
+      int nbr_index_in_heap = buckets[part]->GetLocationOfVertex(v);
+      buckets[part]->ChangePriority(nbr_index_in_heap, new_gain);
+    } else if (CheckBoundaryVertex(hgraph, v, partition_pair, net_degs) == true
+               && buckets[part]->CheckIfVertexExists(v) == false) {
+      MarkBoundary(v);
+      auto gain_cell = CalculateGain(
+          v, from_part, part, hgraph, solution, cur_path_cost, net_degs);
+      buckets[part]->InsertIntoPQ(gain_cell);
+    }
+  }
+}
+
+std::shared_ptr<VertexGain> TPkWayFM::PickMoveKWay(
+    const HGraph hgraph,
+    TP_gain_buckets& buckets,
+    const matrix<float>& curr_block_balance,
+    const matrix<float>& max_block_balance)
+{
+  int to_pid = -1;
+  std::shared_ptr<VertexGain> candidate = std::make_shared<VertexGain>(
+      -1, -std::numeric_limits<float>::max());  // best_candidate
+  // best gain bucket for "corking effect"
+  int best_to_pid = -1;  // block id with best_gain
+  float best_gain = -std::numeric_limits<float>::max();
+  std::shared_ptr<VertexGain> dummy_cell(new VertexGain);
+  for (int i = 0; i < num_parts_; ++i) {
+    if (buckets[i]->GetStatus() == false) {
+      continue;
+    }
+    auto ele = buckets[i]->GetMax();
+    int vertex = ele->GetVertex();
+    float gain = ele->GetGain();
+    if ((gain > candidate->GetGain())
+        && (curr_block_balance[i] + hgraph->vertex_weights_[vertex]
+            < max_block_balance[i])) {
+      to_pid = i;
+      candidate = ele;
+    }
+    // record part for solving corking effect
+    if (gain > best_gain) {
+      best_gain = gain;
+      best_to_pid = i;
+    }
+  }
+
+  if (to_pid > -1) {
+    candidate->SetPotentialMove(to_pid);
+    return candidate;
+  }
+
+  // "corking effect", i.e., no candidate
+  int total_elements = buckets[best_to_pid]->GetTotalElements();
+  if (total_elements == 0) {
+    return dummy_cell;
+  }
+  std::shared_ptr<VertexGain> ele_left(new VertexGain);
+  std::shared_ptr<VertexGain> ele_right(new VertexGain);
+
+  if (to_pid == -1) {
+    int pass = 0;
+    int parent = 0;
+    int total_corking_passes = 25;
+    while (true) {
+      ++pass;
+      int left_child = parent * 2 + 1;
+      int right_child = parent * 2 + 2;
+      bool left = false;
+      bool right = false;
+      // If left child is within bounds of PQ
+      if (left_child < total_elements) {
+        left = true;
+        ele_left = buckets[best_to_pid]->GetHeapVertex(left_child);
+      }
+      if (right_child < total_elements) {
+        right = true;
+        ele_right = buckets[best_to_pid]->GetHeapVertex(right_child);
+      }
+      if (left == true && right == true) {
+        bool legality_of_move_left = CheckLegality(hgraph,
+                                                   best_to_pid,
+                                                   ele_left,
+                                                   curr_block_balance,
+                                                   max_block_balance);
+        bool legality_of_move_right = CheckLegality(hgraph,
+                                                    best_to_pid,
+                                                    ele_right,
+                                                    curr_block_balance,
+                                                    max_block_balance);
+        if (legality_of_move_left == true && legality_of_move_right == true) {
+          if (ele_left->GetGain() > ele_right->GetGain()) {
+            ele_left->SetPotentialMove(best_to_pid);
+            return ele_left;
+          } else {
+            ele_right->SetPotentialMove(best_to_pid);
+            return ele_right;
+          }
+        } else if (legality_of_move_left == true
+                   && legality_of_move_right == false) {
+          ele_left->SetPotentialMove(best_to_pid);
+          return ele_left;
+        } else if (legality_of_move_left == false
+                   && legality_of_move_right == true) {
+          ele_right->SetPotentialMove(best_to_pid);
+          return ele_right;
+        } else {
+          if (hgraph->vertex_weights_[ele_left->GetVertex()]
+              < hgraph->vertex_weights_[ele_right->GetVertex()]) {
+            parent = left_child;
+          } else {
+            parent = right_child;
+          }
+        }
+      } else if (left == true && right == false) {
+        bool legality_of_move = CheckLegality(hgraph,
+                                              best_to_pid,
+                                              ele_left,
+                                              curr_block_balance,
+                                              max_block_balance);
+        if (legality_of_move == true) {
+          ele_left->SetPotentialMove(best_to_pid);
+          return ele_left;
+        } else {
+          parent = left_child;
+        }
+      } else if (left == false && right == true) {
+        bool legality_of_move = CheckLegality(hgraph,
+                                              best_to_pid,
+                                              ele_right,
+                                              curr_block_balance,
+                                              max_block_balance);
+        if (legality_of_move == true) {
+          ele_right->SetPotentialMove(best_to_pid);
+          return ele_right;
+        } else {
+          parent = right_child;
+        }
+      } else {
+        return dummy_cell;
+      }
+      if (pass > total_corking_passes) {
+        return dummy_cell;
+      }
+    }
+  }
+}
+
+// Remove vertex from a heap
+void TPkWayFM::HeapEleDeletion(int vertex_id,
+                               int part,
+                               TP_gain_buckets& buckets)
+{
+  if (buckets[part]->CheckIfVertexExists(vertex_id) == false) {
+    return;
+  }
+  int heap_loc = buckets[part]->GetLocationOfVertex(vertex_id);
+  buckets[part]->RemoveAt(heap_loc);
+  if (buckets[part]->GetSizeOfPQ() == 0) {
+    buckets[part]->SetDeactive();
+  }
+}
+
+void TPkWayFM::AcceptKWayMove(std::shared_ptr<VertexGain> gain_cell,
+                              HGraph hgraph,
+                              std::vector<VertexGain>& moves_trace,
+                              float& total_gain,
+                              float& total_delta_gain,
+                              std::pair<int, int>& partition_pair,
+                              std::vector<int>& solution,
+                              std::vector<float>& paths_cost,
+                              matrix<float>& curr_block_balance,
+                              TP_gain_buckets& gain_buckets,
+                              matrix<int>& net_degs)
+{
+  int vertex_id = gain_cell->GetVertex();
+  // Push the vertex into the moves_trace
+  moves_trace.push_back(*gain_cell);
+  // Add gain of the candidate vertex to the total gain
+  total_gain -= gain_cell->GetGain();
+  total_delta_gain += gain_cell->GetGain();
+  // Deactivate given vertex, meaning it will be never be moved again
+  MarkVisited(vertex_id);
+  gain_cell->SetDeactive();
+  // Update the path cost first
+  for (int i = 0; i < gain_cell->GetTotalPaths(); ++i) {
+    paths_cost[i] = gain_cell->GetPathCost(i);
+  }
+  // Fetch old and new partitions
+  const int prev_part_id = partition_pair.first;
+  const int new_part_id = partition_pair.second;
+  // Update the partition balance
+  curr_block_balance[prev_part_id]
+      = curr_block_balance[prev_part_id] - hgraph->vertex_weights_[vertex_id];
+  curr_block_balance[new_part_id]
+      = curr_block_balance[new_part_id] + hgraph->vertex_weights_[vertex_id];
+  // Update the partition
+  solution[vertex_id] = new_part_id;
+  // update net_degs
+  const int first_valid_entry = hgraph->vptr_[vertex_id];
+  const int first_invalid_entry = hgraph->vptr_[vertex_id + 1];
+  for (int i = first_valid_entry; i < first_invalid_entry; ++i) {
+    const int he = hgraph->vind_[i];
+    --net_degs[he][prev_part_id];
+    ++net_degs[he][new_part_id];
+  }
+  // Remove vertex from all buckets where vertex is present
+  std::vector<std::thread> deletion_threads;
+  for (int i = 0; i < num_parts_; ++i) {
+    deletion_threads.push_back(std::thread(&par::TPkWayFM::HeapEleDeletion,
+                                           this,
+                                           vertex_id,
+                                           i,
+                                           std::ref(gain_buckets)));
+  }
+  for (auto& th : deletion_threads) {
+    th.join();
+  }
+  /*int heap_loc = gain_buckets[new_part_id]->GetLocationOfVertex(vertex_id);
+  gain_buckets[new_part_id]->RemoveAt(heap_loc);
+  if (gain_buckets[new_part_id]->GetSizeOfPQ() == 0) {
+    gain_buckets[new_part_id]->SetDeactive();
+  }*/
+}
+
+float TPkWayFM::Pass(const HGraph hgraph,
+                     const matrix<float>& max_block_balance,
+                     TP_partition& solution,
+                     std::vector<float>& paths_cost)
+{
+  /*std::vector<float> paths_cost;
+  paths_cost.resize(hgraph->num_timing_paths_);
+  // std::vector<int> path_cuts;*/
+  /*for (int path_id = 0; path_id < hgraph->num_timing_paths_; path_id++) {
+    paths_cost[path_id] = CalculatePathCost(path_id, hgraph, solution);
+  }*/
+  matrix<float> block_balance = GetBlockBalance(hgraph, solution);
+  int limit = std::min(
+      std::max(static_cast<int>(0.01 * hgraph->num_vertices_), 15), 100);
+  matrix<float> max_block_balance_tol = max_block_balance;
+  SetTolerance(0.25);
+  for (int j = 0; j < num_parts_; ++j) {
+    MultiplyFactor(max_block_balance_tol[j], 1.0 + GetTolerance());
+  }
+  matrix<int> net_degs = GetNetDegrees(hgraph, solution);
+  TP_gain_buckets buckets;
+  for (int i = 0; i < num_parts_; ++i) {
+    TP_gain_bucket bucket
+        = std::make_shared<TPpriorityQueue>(hgraph->num_vertices_, hgraph);
+    buckets.push_back(bucket);
+  }
+  // Initialize boundary flag
+  InitBoundaryFlags(hgraph->num_vertices_);
+  // Initialize the visit flags to false meaning no vertex has been visited
+  InitVisitFlags(hgraph->num_vertices_);
+  auto partition_pair = std::make_pair(0, 1);
+  std::vector<int> boundary_vertices
+      = FindBoundaryVertices(hgraph, net_degs, partition_pair);
+
+  // Initialize current gain in a multi-thread manner
+  // set based on max heap (k set)
+  // each block has its own max heap
+  InitializeGainBucketsKWay(
+      hgraph, solution, net_degs, boundary_vertices, paths_cost, buckets);
+  VertexGain global_best_ver_gain(-1, -std::numeric_limits<float>::max());
+  std::vector<int> pre_fm = solution;
+  std::vector<int> move_trace;  // store the moved vertices in sequence
+  std::vector<int> partition_trace;
+  float tot_gain = 0.0;
+  std::vector<VertexGain> moves_trace;
+  float cutsize = CutEvaluator(hgraph, solution).first;
+  float min_cut = cutsize;
+  auto timing_cuts = GetTimingCuts(hgraph, solution);
+  int best_total_critical_paths_cut = timing_cuts.first;
+  int best_critical_cut = timing_cuts.second;
+  float critical_factor = 1.0;
+  float worst_factor = 2.0;
+  float cutsize_factor = 0.5;
+  float total_delta_gain = 0.0;
+  int move_limit = 2;
+  int best_move = -1;
+  // Main loop of FM pass
+  for (int i = 0; i < GetMaxMoves(); ++i) {
+    auto candidate
+        = PickMoveKWay(hgraph, buckets, block_balance, max_block_balance);
+    if (candidate->GetStatus() == false) {
+      break;
+    }
+    // update the state of the partitioning
+    int vertex = candidate->GetVertex();  // candidate vertex
+    int from_part = solution[vertex];
+    int to_part = candidate->GetPotentialMove();
+    partition_trace.push_back(from_part);
+    std::pair<int, int> partition_pair = std::make_pair(from_part, to_part);
+    AcceptKWayMove(candidate,
+                   hgraph,
+                   moves_trace,
+                   cutsize,
+                   total_delta_gain,
+                   partition_pair,
+                   solution,
+                   paths_cost,
+                   block_balance,
+                   buckets,
+                   net_degs);
+    std::set<int> neighbors;
+    FindNeighbors(hgraph, vertex, partition_pair, solution, neighbors, true);
+    UpdateNeighboringPaths(
+        partition_pair, neighbors, hgraph, solution, paths_cost);
+    // update the neighbors of v for all gain buckets in parallel
+    std::vector<std::thread> threads;
+    for (int to_pid = 0; to_pid < num_parts_; to_pid++) {
+      threads.push_back(std::thread(&TPkWayFM::UpdateSingleGainBucket,
+                                    this,
+                                    to_pid,
+                                    neighbors,
+                                    std::ref(buckets),
+                                    hgraph,
+                                    solution,
+                                    paths_cost,
+                                    net_degs));
+    }
+    for (auto& t : threads)
+      t.join();  // wait for all threads to finish
+    threads.clear();
+    
+    if (cutsize < min_cut) {
+        min_cut = cutsize;
+        best_move = i;
+      } else if (i - best_move > limit) {
+        break;
+    }
+    /*timing_cuts = GetTimingCuts(hgraph, solution);
+    if (hgraph->num_timing_paths_ > 0) {
+      int total_critical_paths_cut = timing_cuts.first;
+      int worst_cut = timing_cuts.second;
+      int delta_critical_cut
+          = best_total_critical_paths_cut - total_critical_paths_cut;
+      int delta_worst_cut = best_critical_cut - worst_cut;
+      int delta_cut = min_cut - cutsize;
+      float overall_delta
+          = critical_factor * static_cast<float>(delta_critical_cut)
+            + worst_factor * static_cast<float>(delta_worst_cut)
+            + cutsize_factor * static_cast<float>(delta_cut);
+      if (total_critical_paths_cut < best_total_critical_paths_cut) {
+        best_total_critical_paths_cut = total_critical_paths_cut;
+      }
+      if (worst_cut < best_critical_cut) {
+        best_critical_cut = worst_cut;
+      }
+      if (cutsize < min_cut) {
+        min_cut = cutsize;
+      }
+      if (overall_delta > 0) {
+        best_move = i;
+      } else if (i - best_move > limit) {
+        break;
+      }
+    } else {
+      if (cutsize < min_cut) {
+        min_cut = cutsize;
+        best_move = i;
+      } else if (i - best_move > limit) {
+        break;
+      }
+    }*/
+  }
+  if (best_move <= 0) {
+    solution = pre_fm;
+  } else {
+    RollbackMovesKWay(moves_trace,
+                      net_degs,
+                      best_move,
+                      total_delta_gain,
+                      hgraph,
+                      block_balance,
+                      paths_cost,
+                      solution,
+                      partition_trace);
+  }
+
+  return total_delta_gain;
+}
+
+// Greedy two way refinement implementation starts here
 
 void TPgreedyRefine::Refine(const HGraph hgraph,
                             const matrix<float>& max_block_balance,
@@ -1074,8 +1852,8 @@ float TPgreedyRefine::CalculateGain(HGraph hgraph,
       auto post_net_deg = pre_net_deg;
       --post_net_deg[from];
       ++post_net_deg[to];
-      // If the hyperedge was straddling the cut but post movement does not then
-      // this is a gain
+      // If the hyperedge was straddling the cut but post movement does not
+      // then this is a gain
       if (pre_net_deg[from] > 0 && pre_net_deg[to] > 0) {
         if (post_net_deg[from] == 0 && post_net_deg[to] > 0) {
           gain += std::inner_product(hgraph->hyperedge_weights_[he].begin(),
@@ -1211,25 +1989,7 @@ float TPgreedyRefine::Pass(HGraph hgraph,
   }
 }
 
-void TPgreedyRefine::BalancePartition(const HGraph hgraph,
-                                      const matrix<float>& max_block_balance,
-                                      std::vector<int>& solution)
-{
-  std::cout << "[debug] This function balances a partition by greedy moves "
-            << std::endl;
-}
-
-void TPgreedyRefine::RollbackMoves(std::vector<VertexGain>& trace,
-                                   matrix<int>& net_degs,
-                                   int& best_move,
-                                   float& total_delta_gain,
-                                   HGraph hgraph,
-                                   matrix<float>& curr_block_balance,
-                                   std::vector<float>& cur_path_cost,
-                                   std::vector<int>& solution)
-{
-  std::cout << "[debug] this function rolls back greedy moves " << std::endl;
-}
+// Ilp refiner implementation starts here
 
 float TPilpRefine::CalculateGain(int vertex,
                                  TP_partition& solution,
@@ -1284,11 +2044,11 @@ void TPilpRefine::OrderVertexSet(HGraph hgraph,
                                  const matrix<float>& max_block_balance)
 {
   std::vector<float> gain_vertices(hgraph->num_vertices_, 0.0);
-  //std::cout << "[debug] boundary size " << vertices.size() << std::endl;
+  // std::cout << "[debug] boundary size " << vertices.size() << std::endl;
   for (int i = 0; i < vertices.size(); ++i) {
     gain_vertices[i] = CalculateGain(vertices[i], solution, hgraph, net_degs);
   }
-  //std::cout << "[debug] gains have been calculated " << std::endl;
+  // std::cout << "[debug] gains have been calculated " << std::endl;
   auto gain_comparison = [&](int x, int y) {
     if (gain_vertices[x] > gain_vertices[y]) {
       const int from = solution[x];
@@ -1341,7 +2101,7 @@ std::shared_ptr<TPilpGraph> TPilpRefine::ContractHypergraph(
 {
   int total_ilp_vtxs
       = *std::max_element(cluster_map_.begin(), cluster_map_.end()) + 1;
-  //std::cout << "[debug] total ilp vtxs " << total_ilp_vtxs << std::endl;
+  // std::cout << "[debug] total ilp vtxs " << total_ilp_vtxs << std::endl;
   matrix<float> vtx_wts_crs(
       total_ilp_vtxs, std::vector<float>(hgraph->vertex_dimensions_, 0.0));
   std::vector<int> fixed_vtxs_crs(total_ilp_vtxs, -1);
@@ -1357,7 +2117,7 @@ std::shared_ptr<TPilpGraph> TPilpRefine::ContractHypergraph(
       fixed_vtxs_crs[cid] = -1;
     }
   }
-  //std::cout << "[debug] here " << std::endl;
+  // std::cout << "[debug] here " << std::endl;
   matrix<int> hes_crs;
   matrix<float> hes_wts_crs;
   std::map<long long int, int> hash_map;
@@ -1404,6 +2164,101 @@ std::shared_ptr<TPilpGraph> TPilpRefine::ContractHypergraph(
                                                  hes_crs,
                                                  vtx_wts_crs,
                                                  hes_wts_crs));
+}
+
+void TPilpRefine::SolveIlpInstanceOR(std::shared_ptr<TPilpGraph> hgraph,
+                                     TP_partition& refined_partition,
+                                     const matrix<float>& max_block_balance)
+{
+  // reset variable
+  refined_partition.clear();
+  refined_partition.resize(hgraph->GetNumVertices());
+  std::fill(refined_partition.begin(), refined_partition.end(), -1);
+  // Google OR-Tools Implementation
+  std::unique_ptr<MPSolver> solver(MPSolver::CreateSolver("SCIP"));
+
+  // Define constraints
+  // For each vertex, define a variable x
+  // For each hyperedge, define a variable y
+  std::vector<std::vector<const MPVariable*>> x(
+      num_parts_, std::vector<const MPVariable*>(hgraph->GetNumVertices()));
+  std::vector<std::vector<const MPVariable*>> y(
+      num_parts_, std::vector<const MPVariable*>(hgraph->GetNumHyperedges()));
+  // initialize variables
+  for (auto& x_v_vector : x)
+    for (auto& x_v : x_v_vector)
+      x_v = solver->MakeIntVar(
+          0.0, 1.0, "");  // represent whether the vertex is within block
+  for (auto& y_e_vector : y)
+    for (auto& y_e : y_e_vector)
+      y_e = solver->MakeIntVar(
+          0.0, 1.0, "");  // represent whether the hyperedge is within block
+  // define the inifity constant
+  const double infinity = solver->infinity();
+  for (int i = 0; i < hgraph->GetVertexDimensions(); ++i) {
+    // allowed balance for each dimension
+    for (int j = 0; j < num_parts_; ++j) {
+      MPConstraint* constraint
+          = solver->MakeRowConstraint(0.0, max_block_balance[j][i], "");
+      for (int k = 0; k < hgraph->GetNumVertices(); k++) {
+        auto vwt = hgraph->GetVertexWeight(k);
+        constraint->SetCoefficient(x[j][k], vwt[i]);
+      }  // finish travering vertices
+    }    // finish traversing blocks
+  }
+
+  for (int i = 0; i < hgraph->GetNumVertices(); ++i) {
+    if (hgraph->CheckFixedStatus(i) == true) {
+      MPConstraint* constraint = solver->MakeRowConstraint(1, 1, "");
+      constraint->SetCoefficient(x[hgraph->GetFixedPart(i)][i], 1);
+    }
+  }
+
+  // each vertex can only belong to one part
+  for (int i = 0; i < hgraph->GetNumVertices(); ++i) {
+    MPConstraint* constraint = solver->MakeRowConstraint(1, 1, "");
+    for (int j = 0; j < num_parts_; j++) {
+      constraint->SetCoefficient(x[j][i], 1);
+    }
+  }
+  // Hyperedge constraint
+  for (int e = 0; e < hgraph->GetNumHyperedges(); ++e) {
+    std::pair<int, int> indices = hgraph->GetEdgeIndices(e);
+    const int first_valid_entry = indices.first;
+    const int first_invalid_entry = indices.second;
+    for (int j = first_valid_entry; j < first_invalid_entry; ++j) {
+      const int vertex_id = hgraph->eind_[j];
+      for (int k = 0; k < num_parts_; ++k) {
+        MPConstraint* constraint = solver->MakeRowConstraint(0, infinity, "");
+        constraint->SetCoefficient(x[k][vertex_id], 1);
+        constraint->SetCoefficient(y[k][e], -1);
+      }
+    }
+  }
+  // Maximize cutsize objective
+  MPObjective* const obj_expr = solver->MutableObjective();
+  for (int i = 0; i < hgraph->GetNumHyperedges(); ++i) {
+    auto hwt = hgraph->GetHyperedgeWeight(i);
+    const float cost_value = std::inner_product(
+        hwt.begin(), hwt.end(), e_wt_factors_.begin(), 0.0);
+    for (int j = 0; j < num_parts_; ++j) {
+      obj_expr->SetCoefficient(y[j][i], cost_value);
+    }
+  }
+  obj_expr->SetMaximization();
+
+  // Solve the ILP Problem
+  const MPSolver::ResultStatus result_status = solver->Solve();
+  // Check that the problem has an optimal solution.
+  if (result_status == MPSolver::OPTIMAL) {
+    for (int i = 0; i < hgraph->GetNumVertices(); ++i) {
+      for (int j = 0; j < num_parts_; ++j) {
+        if (x[j][i]->solution_value() == 1.0) {
+          refined_partition[i] = j;
+        }
+      }
+    }
+  }
 }
 
 void TPilpRefine::SolveIlpInstance(std::shared_ptr<TPilpGraph> hgraph,
@@ -1543,14 +2398,8 @@ void TPilpRefine::Refine(const HGraph hgraph,
   int wavefront = std::min(boundary_n, 50);
   std::vector<int> wavefront_vertices(boundary_vertices.begin(),
                                       boundary_vertices.begin() + wavefront);
-  /*std::cout << "[debug] wavefront size " << wavefront_vertices.size()
-            << std::endl;
-  std::cout << "[debug] now contracting " << std::endl;*/
   ContractNonBoundary(hgraph, wavefront_vertices, solution);
-  //std::cout << "[debug] contraction done " << std::endl;
   auto clustered_hg_ilp = ContractHypergraph(hgraph, solution, wavefront);
-  /*std::cout << "[debug] ilp graph " << clustered_hg_ilp->GetNumVertices()
-            << " and " << clustered_hg_ilp->GetNumHyperedges() << std::endl;*/
   std::vector<int> partition(clustered_hg_ilp->GetNumVertices(), -1);
   SolveIlpInstance(clustered_hg_ilp, partition, max_vertex_balance);
   if (*std::min_element(partition.begin(), partition.end()) > -1) {
@@ -1560,24 +2409,64 @@ void TPilpRefine::Refine(const HGraph hgraph,
   }
 }
 
-void TPilpRefine::BalancePartition(const HGraph hgraph,
-                                   const matrix<float>& max_block_balance,
-                                   std::vector<int>& solution)
+// KPM based FM implementation starts here
+/*
+// Calculates weight of connections between two partitions
+float TPkpm::CalculateSpan(const HGraph hgraph,
+                           int& from_pid,
+                           int& to_pid,
+                           std::vector<int>& solution)
 {
-  std::cout << "[debug] This function balances a partition by greedy moves "
-            << std::endl;
+  float span = 0.0;
+  for (int i = 0; i < hgraph->num_hyperedges_; ++i) {
+    const int first_valid_entry = hgraph->eptr_[i];
+    const int first_invalid_entry = hgraph->eptr_[i + 1];
+    bool flag_partition_from = false;
+    bool flag_partition_to = false;
+    for (int j = first_valid_entry; j < first_invalid_entry; ++j) {
+      const int v_id = hgraph->eind_[j];
+      if (solution[v_id] == from_pid) {
+        flag_partition_from = true;
+      } else if (solution[v_id] == to_pid) {
+        flag_partition_to = true;
+      }
+    }
+    if (flag_partition_from == true && flag_partition_to == true) {
+      span += std::inner_product(hgraph->hyperedge_weights_[i].begin(),
+                                 hgraph->hyperedge_weights_[i].end(),
+                                 e_wt_factors_.begin(),
+                                 0.0);
+    }
+  }
+  return span;
 }
 
-void TPilpRefine::RollbackMoves(std::vector<VertexGain>& trace,
-                                matrix<int>& net_degs,
-                                int& best_move,
-                                float& total_delta_gain,
-                                HGraph hgraph,
-                                matrix<float>& curr_block_balance,
-                                std::vector<float>& cur_path_cost,
-                                std::vector<int>& solution)
+void TPkpm::FindTightlyConnectedPairs(const HGraph hgraph,
+                                      std::vector<int>& solution)
 {
-  std::cout << "[debug] this function rolls back greedy moves " << std::endl;
+  int id = -1;
+  std::vector<TP_partition_pair_ptr> pairs;
+  for (int i = 0; i < num_parts_; ++i) {
+    for (int j = i + 1; j < num_parts_; ++j) {
+      float connection = CalculateSpan(hgraph, i, j, solution);
+      auto pair = std::make_shared<TPpartitionPair>(++id, i, j, connection);
+      pairs.push_back(pair);
+    }
+  }
+  std::vector<int8_t> pair_visited(num_parts_, 0);
+  auto pair_comp = [&](TP_partition_pair_ptr x, TP_partition_pair_ptr y) {
+    return x->GetConnectivity > y->GetConnectivity();
+  } std::sort(pairs.begin(), pairs.end(), pair_comp);
+  std::vector<std::pair<int, int>> kpm_pairs;
+  for (int i = 0; i < pairs.size(); ++i) {
+    auto kpm_pair = pairs[i];
+    int pair_x = kpm_pair->GetPairX();
+    int pair_y = kpm_pair->GetPairY();
+    if (pair_visited[pair_x] == 1 || pair_visited[pair_y] == 1) {
+      continue;
+    }
+    kpm_pairs.push_back(std::make_pair(pair_x, pair_y));
+  }
 }
-
+*/
 }  // namespace par

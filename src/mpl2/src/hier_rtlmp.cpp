@@ -226,6 +226,10 @@ void HierRTLMP::hierRTLMacroPlacer()
           db_->getTech()->findRoutingLayer(snap_layer_)->getPitchY()),
       dbu_);
 
+  std::cout << "golden pitch_x = " << micronToDbu(pitch_x_, dbu_)
+            << "golden pitch_y = " << micronToDbu(pitch_y_, dbu_)
+            << std::endl;
+            
   //
   // Get the floorplan information
   //
@@ -487,6 +491,17 @@ Metrics* HierRTLMP::computeMetrics(odb::dbModule* module)
       // add hard macro to corresponding map
       HardMacro* macro = new HardMacro(inst, dbu_, halo_width_);
       hard_macro_map_[inst] = macro;
+      // print the basic information of the pins
+      for (odb::dbMTerm* mterm : master->getMTerms()) {
+        if (mterm->getSigType() == odb::dbSigType::SIGNAL) {
+          for (odb::dbMPin* mpin : mterm->getMPins()) {
+            for (odb::dbBox* box : mpin->getGeometry()) {
+              odb::dbTechLayer* layer = box->getTechLayer();
+              std::cout << "pitch_x = " << layer->getPitchX() << "  pitch_y = " << layer->getPitchY() << std::endl;
+            }
+          }
+       }
+      }
     } else {
       num_std_cell += 1;
       std_cell_area += inst_area;
@@ -1793,7 +1808,8 @@ void HierRTLMP::breakLargeFlatCluster(Cluster* parent)
       || parent->getLeafStdCells().size() < max_num_inst_) {
     return;
   }
-
+  // set the instance property
+  setInstProperty(parent);
   std::map<int, int> cluster_vertex_id_map;
   std::map<odb::dbInst*, int> inst_vertex_id_map;
   const int parent_cluster_id = parent->getId();
@@ -1827,7 +1843,7 @@ void HierRTLMP::breakLargeFlatCluster(Cluster* parent)
       continue;
     }
     int driver_id = -1;         // vertex id of the driver instance
-    std::vector<int> loads_id;  // vertex id of the sink instances
+    std::set<int> loads_id; // vertex id of the sink instances
     bool pad_flag = false;
     // check the connected instances
     for (odb::dbITerm* iterm : net->getITerms()) {
@@ -1845,13 +1861,13 @@ void HierRTLMP::breakLargeFlatCluster(Cluster* parent)
       }
       const int cluster_id
           = odb::dbIntProperty::find(inst, "cluster_id")->getValue();
-      int vertex_id = (cluster_id == parent_cluster_id)
-                          ? cluster_vertex_id_map[cluster_id]
-                          : inst_vertex_id_map[inst];
+      int vertex_id = (cluster_id != parent_cluster_id)
+                      ? cluster_vertex_id_map[cluster_id]
+                      : inst_vertex_id_map[inst];
       if (iterm->getIoType() == odb::dbIoType::OUTPUT) {
         driver_id = vertex_id;
       } else {
-        loads_id.push_back(vertex_id);
+        loads_id.insert(vertex_id);
       }
     }
     // ignore the nets with IO pads
@@ -1865,13 +1881,14 @@ void HierRTLMP::breakLargeFlatCluster(Cluster* parent)
       if (bterm->getIoType() == odb::dbIoType::INPUT) {
         driver_id = cluster_vertex_id_map[cluster_id];
       } else {
-        loads_id.push_back(cluster_vertex_id_map[cluster_id]);
+        loads_id.insert(cluster_vertex_id_map[cluster_id]);
       }
     }
+    loads_id.insert(driver_id);
     // add the net as a hyperedge
-    if (driver_id != -1 && loads_id.size() > 0
+    if (driver_id != -1 && loads_id.size() > 1
         && loads_id.size() < large_net_threshold_) {
-      std::vector<int> hyperedge { driver_id };
+      std::vector<int> hyperedge;
       hyperedge.insert(hyperedge.end(), loads_id.begin(), loads_id.end());
       hyperedges.push_back(hyperedge);
     }
@@ -1922,7 +1939,6 @@ void HierRTLMP::breakLargeFlatCluster(Cluster* parent)
   cluster_map_[cluster_id_++] = cluster_part_1;
   cluster_part_1->setParent(parent->getParent());
   parent->getParent()->addChild(cluster_part_1);
-
   // Recursive break the cluster
   // until the size of the cluster is less than max_num_inst_
   breakLargeFlatCluster(parent);

@@ -96,6 +96,28 @@ void TPcoarsener::OrderVertices(const HGraph hgraph, std::vector<int>& vertices)
     // no shuffling just stick with default ordering of vertices
   } else if (order_choice == SPECTRAL) {
     // need code here for spectral based ordering
+  } else if (order_choice == TIMING) {
+    // need code here for timing paths based vertex ordering
+    /*std::set<int> path_vertices;
+    std::vector<int> visited(hgraph->num_vertices_, 0);
+    for (int i = 0; i < hgraph->num_timing_paths_; ++i) {
+      const int first_valid_entry = hgraph->vptr_p_[i];
+      const int first_invalid_entry = hgraph->vptr_p_[i + 1];
+      for (int j = first_valid_entry; j < first_invalid_entry; ++j) {
+        int v = hgraph->vind_p_[j];
+        visited[v] = 1;
+        path_vertices.insert(v);
+      }
+    }
+    for (int i = 0; i < hgraph->num_vertices_; ++i) {
+      if (visited[i] == 0) {
+        unvisited.push_back(i);
+      }
+    }
+    shuffle(
+        unvisited.begin(), unvisited.end(), std::default_random_engine(seed_));
+    unvisited.insert(
+        unvisited.begin(), path_vertices.begin(), path_vertices.end());*/
   }
 }
 
@@ -114,14 +136,15 @@ inline const float TPcoarsener::GetClusterScore(
   return he_score;
 }
 
-inline const std::vector<float> TPcoarsener::AverageClusterWt(const HGraph hgraph)
+inline const std::vector<float> TPcoarsener::AverageClusterWt(
+    const HGraph hgraph)
 {
-  std::vector<float> total_wt (hgraph->vertex_dimensions_, 0.0); 
+  std::vector<float> total_wt(hgraph->vertex_dimensions_, 0.0);
   for (int i = 0; i < hgraph->num_vertices_; ++i) {
     total_wt = total_wt + hgraph->vertex_weights_[i];
   }
-  float scale = 4.5; 
-  return DivideFactor(total_wt, hgraph->num_vertices_/scale);
+  float scale = 4.5;
+  return DivideFactor(total_wt, hgraph->num_vertices_ / scale);
 }
 
 void TPcoarsener::VertexMatching(
@@ -166,7 +189,7 @@ void TPcoarsener::VertexMatching(
     }
   }
   OrderVertices(hgraph, unvisited);
-  //thr_cluster_weight_ = AverageClusterWt(hgraph); 
+  // thr_cluster_weight_ = AverageClusterWt(hgraph);
   for (auto v_itr = unvisited.begin(); v_itr != unvisited.end(); ++v_itr) {
     const int v = *v_itr;
     if (vertex_c_attr[v] != -1) {
@@ -194,9 +217,7 @@ void TPcoarsener::VertexMatching(
         if (nbr_v == v) {
           continue;
         }
-        if (score_map.find(nbr_v) != score_map.end()) {
-          score_map[nbr_v] += he_score;
-        } else {
+        if (score_map.find(nbr_v) == score_map.end()) {
           if ((hgraph->fixed_vertex_flag_ == true
                && hgraph->fixed_attr_[nbr_v] > -1)
               || (hgraph->community_flag_ == true
@@ -213,11 +234,13 @@ void TPcoarsener::VertexMatching(
             continue;
           }
           score_map[nbr_v] = he_score;
+        } else {
+          score_map[nbr_v] += he_score;
         }
-        //score_map[nbr_v] += 0.25 * he_reduction_count;
+        // score_map[nbr_v] += 0.25 * he_reduction_count;
       }
     }
-    
+
     if (score_map.size() == 0) {
       vertex_c_attr[v] = cluster_id++;
       vertex_weights_c.push_back(hgraph->vertex_weights_[v]);
@@ -232,7 +255,7 @@ void TPcoarsener::VertexMatching(
       }
       continue;
     }
-    if (hgraph->num_timing_paths_ >= 1 && path_traverse_step_ > 0) {
+    if (hgraph->num_timing_paths_ > 0 && path_traverse_step_ > 0) {
       const int first_valid_entry_pv = hgraph->pptr_v_[v];
       const int first_invalid_entry_pv = hgraph->pptr_v_[v + 1];
       std::map<int, float> timing_neighbors;
@@ -241,7 +264,8 @@ void TPcoarsener::VertexMatching(
         const int first_valid_entry_p = hgraph->vptr_p_[p];
         const int first_invalid_entry_p = hgraph->vptr_p_[p + 1];
         const float timing_attr
-            = hgraph->timing_attr_[p] * timing_factor_ / path_traverse_step_;
+            = hgraph->timing_attr_[p] * timing_factor_
+              / path_traverse_step_;  // path_traverse_step is for normalizing
         int p_ptr = hgraph->vptr_p_[p];
         while (p_ptr < first_invalid_entry_p) {
           if (hgraph->vind_p_[p_ptr] == v) {
@@ -360,6 +384,7 @@ HGraph TPcoarsener::Contraction(HGraph hgraph,
 {
   TP_matrix<int> hyperedges_c;
   TP_matrix<float> hyperedges_weights_c;
+  TP_matrix<float> nonscaled_hyperedges_weights_c;
   std::map<long long int, int> hash_map;
   for (int i = 0; i < hgraph->num_hyperedges_; ++i) {
     const int first_valid_entry = hgraph->eptr_[i];
@@ -383,6 +408,10 @@ HGraph TPcoarsener::Contraction(HGraph hgraph,
     if (hash_map.find(hash_value) == hash_map.end()) {
       hash_map[hash_value] = static_cast<int>(hyperedges_c.size());
       hyperedges_weights_c.push_back(hgraph->hyperedge_weights_[i]);
+      if (hgraph->num_timing_paths_ > 0) {
+        nonscaled_hyperedges_weights_c.push_back(
+            hgraph->nonscaled_hyperedge_weights_[i]);
+      }
       hyperedges_c.push_back(
           std::vector<int>(hyperedge_c.begin(), hyperedge_c.end()));
     } else {
@@ -391,8 +420,17 @@ HGraph TPcoarsener::Contraction(HGraph hgraph,
       if (hyperedges_c[hash_id] == hyperedge_vec) {
         hyperedges_weights_c[hash_id]
             = hyperedges_weights_c[hash_id] + hgraph->hyperedge_weights_[i];
+        if (hgraph->num_timing_paths_ > 0) {
+          nonscaled_hyperedges_weights_c[hash_id]
+              = nonscaled_hyperedges_weights_c[hash_id]
+                + hgraph->nonscaled_hyperedge_weights_[i];
+        }
       } else {
         hyperedges_weights_c.push_back(hgraph->hyperedge_weights_[i]);
+        if (hgraph->num_timing_paths_ > 0) {
+          nonscaled_hyperedges_weights_c.push_back(
+              hgraph->nonscaled_hyperedge_weights_[i]);
+        }
         hyperedges_c.push_back(hyperedge_vec);
       }
     }
@@ -401,17 +439,18 @@ HGraph TPcoarsener::Contraction(HGraph hgraph,
   TP_matrix<int> paths_c;
   std::vector<float> timing_attr_c;
   hash_map.clear();
-  if (hgraph->num_timing_paths_ >= 1) {
+  if (hgraph->num_timing_paths_ > 0) {
     for (int p = 0; p < hgraph->num_timing_paths_; ++p) {
       const int first_valid_entry_p = hgraph->vptr_p_[p];
       const int first_invalid_entry_p = hgraph->vptr_p_[p + 1];
       if (first_invalid_entry_p - first_valid_entry_p <= 1) {
         continue;
       }
-      std::vector<int> path{hgraph->vind_p_[first_valid_entry_p]};
+      std::vector<int> path{
+          vertex_c_attr[hgraph->vind_p_[first_valid_entry_p]]};
       for (int i = first_valid_entry_p + 1; i < first_invalid_entry_p; ++i) {
         if (path.back() != hgraph->vind_p_[i]) {
-          path.push_back(hgraph->vind_p_[i]);
+          path.push_back(vertex_c_attr[hgraph->vind_p_[i]]);
         }
       }
       if (path.size() <= 1) {
@@ -444,6 +483,7 @@ HGraph TPcoarsener::Contraction(HGraph hgraph,
                                         hyperedges_c,
                                         vertex_weights_c,
                                         hyperedges_weights_c,
+                                        nonscaled_hyperedges_weights_c,
                                         fixed_attr_c,
                                         community_attr_c,
                                         hgraph->placement_dimensions_,
@@ -473,9 +513,85 @@ HGraph TPcoarsener::Aggregate(HGraph hgraph)
                                       fixed_attr_c,
                                       vertex_weights_c,
                                       placement_attr_c);
-  //hgraph->vertex_c_attr_ = vertex_c_attr;  // update clustering attr
+  // hgraph->vertex_c_attr_ = vertex_c_attr;  // update clustering attr
   return clustered_hgraph;
 }
+
+std::vector<int> TPcoarsener::PathBasedCommunity(HGraph hgraph)
+{
+  std::set<int> path_community;
+  for (int i = 0; i < hgraph->num_timing_paths_; ++i) {
+    const int first_valid_entry = hgraph->vptr_p_[i];
+    const int first_invalid_entry = hgraph->vptr_p_[i + 1];
+    for (int j = first_valid_entry; j < first_invalid_entry; ++j) {
+      int v = hgraph->vind_p_[j];
+      path_community.insert(v);
+    }
+  }
+  std::vector<int> community(path_community.begin(), path_community.end());
+  std::vector<int> vtx_community(hgraph->num_vertices_, 0);
+  for (auto& v : community) {
+    vtx_community[v] = 1;
+  }
+  return vtx_community;
+}
+
+/*
+// Future faster implementation of FC
+
+int TPcoarsener::FirstChoice(int num_vertices,
+                             int num_hyperedges,
+                             std::vector<int> adj_list,
+                             std::vector<float> wt_list,
+                             std::vector<int> coarsened_hypergraph)
+{
+  std::vector<int> degree(num_vertices, 0);
+  std::vector<int> matching(num_vertices, -1);
+  std::vector<int> merge_stack(num_vertices, 0);
+  int num_coarsened_vertices = 0;
+
+  // Initialize degree array
+  for (int i = 0; i < num_vertices; ++i) {
+    degree[i] = 0;
+    for (int j = adj_list[i]; j < adj_list[i + 1]; ++j) {
+      degree[i] += wt_list[j];  // adding wts
+    }
+  }
+
+  // Repeat untill all vertices are matched
+  for (int i = 0; i < num_vertices; ++i) {
+    if (matching[i] == -1) {
+      int top = 0;
+      merge_stack[top] = i;
+      while (top >= 0) {
+        int u = merge_stack[top];
+        --top;
+        for (int j = adj_list[u]; j < adj_list[u + 1]; ++j) {
+          int v = adj_list[j];
+          if (matching[v] == -1) {
+            matching[v] = u;
+            merge_stack[++top] = v;
+            break;
+          } else if (degree[u] + degree[v]
+                     > degree[matching[u]] + degree[matching[v]]) {
+            int w = matching[v];
+            matching[v] = u;
+            merge_stack[++top] = w;
+          }
+        }
+      }
+    }
+  }
+
+  // Form coarser hypergraph
+
+  for (int i = 0; i < num_vertices; ++i) {
+    if (matching[i] >= i) {
+      coarsened_hypergraph[num_coarsened_vertices++] = i;
+    }
+  }
+}
+*/
 
 TP_coarse_graphs TPcoarsener::LazyFirstChoice(HGraph hgraph)
 {
@@ -483,19 +599,15 @@ TP_coarse_graphs TPcoarsener::LazyFirstChoice(HGraph hgraph)
   std::vector<HGraph> hierarchy;  // a sequence of coarser hypergraphs
   hierarchy.push_back(hgraph);    // push original hgraph to vector
   int cur_num_vertices = hgraph->num_vertices_;
-  std::cout << "[" << std::left << std::setw(6) << "Iter" << std::left
-            << std::setw(10) << "Vtxs" << std::left << std::setw(10) << "Hdgs"
-            << std::left << std::setw(10) << "Sum_Vtxs" << std::left
-            << std::setw(10) << "Sum_Hdges"
-            << "]" << std::endl;
-  std::cout << "[" << std::left << std::setw(6) << "0" << std::left
-            << std::setw(10) << hierarchy.back()->num_vertices_ << std::left
-            << std::setw(10) << hierarchy.back()->num_hyperedges_ << std::left
-            << std::setw(10)
-            << GetVectorString(hierarchy.back()->GetTotalVertexWeights())
-            << std::left << std::setw(10)
-            << GetVectorString(hierarchy.back()->GetTotalHyperedgeWeights())
-            << "]" << std::endl;
+  logger_->report("=========================================");
+  logger_->report("[STATUS] Running FC multilevel coarsening ");
+  logger_->report("=========================================");
+  logger_->report(
+      "[COARSEN] Level 0 :: {}, {}, {}, {}",
+      hierarchy.back()->num_vertices_,
+      hierarchy.back()->num_hyperedges_,
+      GetVectorString(hierarchy.back()->GetTotalVertexWeights()),
+      GetVectorString(hierarchy.back()->GetTotalHyperedgeWeights()));
   for (int num_iter = 0; num_iter < thr_coarsen_iters_; ++num_iter) {
     // do coarsening step
     int num_vertices_old = hierarchy.back()->num_vertices_;
@@ -505,14 +617,13 @@ TP_coarse_graphs TPcoarsener::LazyFirstChoice(HGraph hgraph)
       break;
     }
     hierarchy.push_back(hg);
-    std::cout << "[" << std::left << std::setw(6) << num_iter + 1 << std::left
-              << std::setw(10) << hierarchy.back()->num_vertices_ << std::left
-              << std::setw(10) << hierarchy.back()->num_hyperedges_ << std::left
-              << std::setw(10)
-              << GetVectorString(hierarchy.back()->GetTotalVertexWeights())
-              << std::left << std::setw(10)
-              << GetVectorString(hierarchy.back()->GetTotalHyperedgeWeights())
-              << "]" << std::endl;
+    logger_->report(
+        "[COARSEN] Level {} :: {}, {}, {}, {}",
+        num_iter + 1,
+        hierarchy.back()->num_vertices_,
+        hierarchy.back()->num_hyperedges_,
+        GetVectorString(hierarchy.back()->GetTotalVertexWeights()),
+        GetVectorString(hierarchy.back()->GetTotalHyperedgeWeights()));
     const float cut_diff_ratio
         = static_cast<float>(cur_num_vertices - hierarchy.back()->num_vertices_)
           / static_cast<float>(hierarchy.back()->num_vertices_);
@@ -533,8 +644,7 @@ TP_coarse_graphs TPcoarsener::LazyFirstChoice(HGraph hgraph)
                           end_timestamp - start_timestamp)
                           .count()
                       * 1e-9;
-  std::cout << "**Hierarchical coarsening time** " << time_taken << "seconds"
-            << std::endl;
+  logger_->report("[INFO] Hierarchical coarsening time {} seconds", time_taken);
   return hierarchy;
 }
 }  // namespace par

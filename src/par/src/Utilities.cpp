@@ -72,6 +72,42 @@ void WriteSolution(const char* solution_file, std::vector<int>& solution)
   solution_file_output.close();
 }
 
+void AnalyzeTimingOfPartition(std::vector<std::vector<int>>& paths,
+                              const char* solution_file)
+{
+}
+
+std::shared_ptr<TimingCuts> AnalyzeTimingOfPartition(std::vector<std::vector<int>>& paths,
+                              std::vector<int>& solution)
+{
+  int total_cuts = 0;
+  int worst_cut = -std::numeric_limits<int>::max();
+  int total_paths_cut = 0;
+  for (auto& path : paths) {
+    std::vector<int> block_path;
+    for (auto& v : path) {
+      int block_id = solution[v];
+      if (block_path.empty() == true || block_path.back() != block_id) {
+        block_path.push_back(block_id);
+      }
+    }
+    int cut = block_path.size() - 1;
+    if (cut > 0) {
+      ++total_paths_cut;
+    }
+    total_cuts += cut;
+    if (cut > worst_cut) {
+      worst_cut = cut;
+    }
+  }
+
+  return std::make_shared<TimingCuts>(
+      total_paths_cut,
+      static_cast<float>(total_cuts) / static_cast<float>(paths.size()),
+      worst_cut,
+      paths.size());
+}
+
 std::string GetVectorString(std::vector<float> vec)
 {
   std::string line = "";

@@ -94,6 +94,26 @@ class TPpartitioner
         logger_(logger)
   {
   }
+  TPpartitioner(int num_parts,
+                const std::vector<float>& e_wt_factors,
+                float path_wt_factor,
+                float snaking_wt_factor,
+                float early_stop_ratio,
+                int max_num_fm_pass,
+                int seed,
+                TP_k_way_refining_ptr tritonpart_k_way_refiner,
+                utl::Logger* logger)
+      : num_parts_(num_parts),
+        e_wt_factors_(e_wt_factors),
+        path_wt_factor_(path_wt_factor),
+        snaking_wt_factor_(snaking_wt_factor),
+        early_stop_ratio_(early_stop_ratio),
+        max_num_fm_pass_(max_num_fm_pass),
+        seed_(seed),
+        tritonpart_k_way_refiner_(tritonpart_k_way_refiner),
+        logger_(logger)
+  {
+  }
 
   TPpartitioner(const TPpartitioner&) = default;
   TPpartitioner(TPpartitioner&&) = default;
@@ -103,6 +123,7 @@ class TPpartitioner
   TP_partition_token GoldenEvaluator(const HGraph hgraph,
                                      std::vector<int>& solution,
                                      bool print_flag = true);
+  void TimingCutsEvaluator(const HGraph hgraph, std::vector<int>& solution);
   void Partition(const HGraph hgraph,
                  const matrix<float>& max_block_balance,
                  std::vector<int>& solutione);
@@ -125,6 +146,9 @@ class TPpartitioner
   void InitPartVileTwoWay(const HGraph hgraph,
                           const matrix<float>& max_block_balance,
                           std::vector<int>& solution);
+  void InitPartVileKWay(const HGraph hgraph,
+                        const matrix<float>& max_block_balance,
+                        std::vector<int>& solution);
   void RandomPart(const HGraph graph,
                   const matrix<float>& max_block_balance,
                   std::vector<int>& solution);
@@ -135,6 +159,7 @@ class TPpartitioner
                                  const matrix<float>& max_block_balance,
                                  std::vector<int>& solution);
   TP_two_way_refining_ptr tritonpart_two_way_refiner_ = nullptr;
+  TP_k_way_refining_ptr tritonpart_k_way_refiner_ = nullptr;
   int num_parts_;
   std::vector<float> e_wt_factors_;
   float path_wt_factor_;

@@ -55,7 +55,8 @@ enum order
   DEGREE, 
   SIZE, 
   DEFAULT,
-  SPECTRAL
+  SPECTRAL,
+  TIMING
 };
 
 class TPcoarsener
@@ -101,6 +102,7 @@ class TPcoarsener
   ~TPcoarsener() = default;
   void SetVertexOrderChoice(const int choice) { vertex_order_choice_ = choice; }
   int GetVertexOrderChoice() const { return vertex_order_choice_; }
+  std::vector<int> PathBasedCommunity(HGraph hgraph);
   TP_coarse_graphs LazyFirstChoice(HGraph hgraph);
 
  private:

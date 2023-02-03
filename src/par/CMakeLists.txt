@@ -61,16 +61,11 @@ target_sources(par
     src/TritonPart.cpp
     src/TPHypergraph.cpp
     src/Utilities.cpp
-    src/Coarsening.cpp
-    src/Partitioner.cpp
-    src/Multilevel.cpp
-    src/KPMRefinement.cpp
-    src/ILPbasedRefinement.cpp
-    src/RecordStatistics.cpp
     src/TPCoarsener.cpp
     src/TPMultilevel.cpp
-    src/TPPartitioner.cpp
     src/TPRefiner.cpp
+    src/TPPartitioner.cpp
+    src/KPMRefinement.cpp
 )
 
 messages(

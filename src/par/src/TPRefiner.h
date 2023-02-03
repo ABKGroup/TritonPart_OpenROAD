@@ -184,7 +184,8 @@ class TPrefiner
                      int& vertex,
                      std::pair<int, int>& partition_pair,
                      TP_partition& solution,
-                     std::set<int>& neighbors);
+                     std::set<int>& neighbors,
+                     bool k_flag);
   bool CheckBoundaryVertex(const HGraph hgraph,
                            const int& v,
                            const std::pair<int, int> partition_pair,
@@ -199,6 +200,11 @@ class TPrefiner
                           const std::vector<int>& solution,
                           int v = -1,
                           int to_pid = -1);
+  void UpdateNeighboringPaths(const std::pair<int, int>& partition_pair,
+                              const std::set<int>& neighbors,
+                              const HGraph hgraph,
+                              const TP_partition& solution,
+                              std::vector<float>& paths_cost);
   matrix<float> GetBlockBalance(const HGraph hgraph,
                                 std::vector<int>& solution);
   TP_gain_cell CalculateGain(int v,
@@ -261,6 +267,25 @@ class TPrefiner
   std::vector<float> GetEdgeWtFactors() const { return e_wt_factors_; }
   float GetPathWtFactor() const { return path_wt_factor_; }
   float GetSnakingWtFactor() const { return snaking_wt_factor_; }
+  void GeneratePathsAsEdges(const HGraph hgraph);
+  void ReweighTimingWeights(int path,
+                            const HGraph hgraph,
+                            std::vector<int>& solution,
+                            std::vector<float>& path_cost);
+  std::pair<int, int> GetTimingCuts(const HGraph hgraph,
+                                    std::vector<int>& solution);
+  inline void InitPathCuts(const HGraph hgraph,
+                           std::vector<int>& path_cuts,
+                           std::vector<int>& solution);
+  void SetPathCuts(const int val)
+  {
+    path_cuts_.resize(val);
+    std::fill(path_cuts_.begin(), path_cuts_.end(), 0);
+  }
+  int GetPathCuts(int pathid, const HGraph hgraph, std::vector<int>& solution);
+  inline void InitPaths(const HGraph hgraph,
+                        std::vector<float>& path_cost,
+                        std::vector<int>& solution);
   utl::Logger* GetLogger() const { return logger_; }
 
  protected:
@@ -272,6 +297,8 @@ class TPrefiner
   std::vector<float> e_wt_factors_;
   std::vector<bool> boundary_;
   std::vector<bool> visit_;
+  matrix<int> paths_;  // paths represented as set of hyperedges
+  std::vector<int> path_cuts_;
   float path_wt_factor_;
   float snaking_wt_factor_;
   float tolerance_;
@@ -446,7 +473,8 @@ class TPtwoWayFM : public TPrefiner
                              TP_gain_buckets& buckets);
   float Pass(const HGraph hgraph,
              const matrix<float>& max_block_balance,
-             TP_partition& solution);
+             TP_partition& solution,
+             std::vector<float>& paths_cost);
   int max_moves_;
 };
 
@@ -456,30 +484,107 @@ class TPkWayFM : public TPrefiner
 {
  public:
   TPkWayFM() = default;
+  TPkWayFM(const int num_parts,
+           const int refiner_iters,
+           const int max_moves,
+           const int refiner_choice,
+           const int seed,
+           const std::vector<float> e_wt_factors,
+           const float path_wt_factor,
+           const float snaking_wt_factor,
+           utl::Logger* logger)
+      : TPrefiner(num_parts,
+                  refiner_iters,
+                  refiner_choice,
+                  seed,
+                  e_wt_factors,
+                  path_wt_factor,
+                  snaking_wt_factor,
+                  logger)
+  {
+    max_moves_ = max_moves;
+  }
   TPkWayFM(const TPkWayFM&) = default;
   TPkWayFM(TPkWayFM&&) = default;
   TPkWayFM& operator=(const TPkWayFM&) = default;
   TPkWayFM& operator=(TPkWayFM&&) = default;
   ~TPkWayFM() = default;
-  // void Refine(HGraph hgraph, TP_partition& solution) override;
-  // void BalancePartition(HGraph hgraph, TP_partition& solution) override;
+  void Refine(const HGraph hgraph,
+              const matrix<float>& max_block_balance,
+              TP_partition& solution) override;
+  void SetMaxMoves(const int moves) { max_moves_ = moves; }
+  int GetMaxMoves() const { return max_moves_; }
+  void BalancePartition(const HGraph hgraph,
+                        const matrix<float>& max_block_balance,
+                        TP_partition& solution) override
+  {
+  }
 
  private:
+  float Pass(const HGraph hgraph,
+             const matrix<float>& max_block_balance,
+             TP_partition& solution,
+             std::vector<float>& paths_cost);
+  void HeapEleDeletion(int vertex_id, int part, TP_gain_buckets& buckets);
+  void InitializeSingleGainBucket(TP_gain_buckets& buckets,
+                                  int to_pid,
+                                  const std::vector<int>& boundary_vertices,
+                                  const HGraph hgraph,
+                                  const TP_partition& solution,
+                                  const std::vector<float>& cur_path_cost,
+                                  const matrix<int>& net_degs);
+  void UpdateSingleGainBucket(int part,
+                              const std::set<int>& neighbors,
+                              TP_gain_buckets& buckets,
+                              const HGraph hgraph,
+                              const TP_partition& solution,
+                              const std::vector<float>& cur_path_cost,
+                              const matrix<int>& net_degs);
+  void InitializeGainBucketsKWay(const HGraph hgraph,
+                                 const TP_partition& solution,
+                                 const matrix<int>& net_degs,
+                                 const std::vector<int>& boundary_vertices,
+                                 const std::vector<float>& cur_path_cost,
+                                 TP_gain_buckets& buckets);
+  void AcceptKWayMove(std::shared_ptr<VertexGain> gain_cell,
+                      HGraph hgraph,
+                      std::vector<VertexGain>& moves_trace,
+                      float& total_gain,
+                      float& total_delta_gain,
+                      std::pair<int, int>& partition_pair,
+                      std::vector<int>& solution,
+                      std::vector<float>& paths_cost,
+                      matrix<float>& curr_block_balance,
+                      TP_gain_buckets& gain_buckets,
+                      matrix<int>& net_degs);
+  void RollbackMoves(std::vector<VertexGain>& trace,
+                     matrix<int>& net_degs,
+                     int& best_move,
+                     float& total_delta_gain,
+                     HGraph hgraph,
+                     matrix<float>& curr_block_balance,
+                     std::vector<float>& cur_path_cost,
+                     std::vector<int>& solution) override
+  {
+  }
+  void RollbackMovesKWay(std::vector<VertexGain>& trace,
+                         matrix<int>& net_degs,
+                         int& best_move,
+                         float& total_delta_gain,
+                         HGraph hgraph,
+                         matrix<float>& curr_block_balance,
+                         std::vector<float>& cur_path_cost,
+                         std::vector<int>& solution,
+                         std::vector<int>& partition_trace);
+  std::shared_ptr<VertexGain> PickMoveKWay(
+      const HGraph hgraph,
+      TP_gain_buckets& buckets,
+      const matrix<float>& curr_block_balance,
+      const matrix<float>& max_block_balance);
   int max_moves_;
 };
 
-class TPkPairWiseFM : public TPrefiner
-{
- public:
-  TPkPairWiseFM() = default;
-  TPkPairWiseFM(const TPkPairWiseFM&) = default;
-  TPkPairWiseFM(TPkPairWiseFM&&) = default;
-  TPkPairWiseFM& operator=(const TPkPairWiseFM&) = default;
-  TPkPairWiseFM& operator=(TPkPairWiseFM&&) = default;
-  ~TPkPairWiseFM() = default;
-  // void Refine(HGraph hgraph, TP_partition& solution) override;
-  // void BalancePartition(HGraph hgraph, TP_partition& solution) override;
-};
+using TP_k_way_refining_ptr = std::shared_ptr<TPkWayFM>;
 
 class TPgreedyRefine : public TPrefiner
 {
@@ -516,7 +621,9 @@ class TPgreedyRefine : public TPrefiner
               TP_partition& solution) override;
   void BalancePartition(const HGraph hgraph,
                         const matrix<float>& max_block_balance,
-                        std::vector<int>& solution) override;
+                        std::vector<int>& solution) override
+  {
+  }
   void RollbackMoves(std::vector<VertexGain>& trace,
                      matrix<int>& net_degs,
                      int& best_move,
@@ -524,7 +631,9 @@ class TPgreedyRefine : public TPrefiner
                      HGraph hgraph,
                      matrix<float>& curr_block_balance,
                      std::vector<float>& cur_path_cost,
-                     std::vector<int>& solution) override;
+                     std::vector<int>& solution) override
+  {
+  }
 
  private:
   float CalculateGain(HGraph hgraph,
@@ -663,6 +772,9 @@ class TPilpRefine : public TPrefiner
   {
     wavefront_ = wavefront;
   }
+  void SolveIlpInstanceOR(std::shared_ptr<TPilpGraph> hgraph,
+                          TP_partition& refined_partition,
+                          const matrix<float>& max_block_balance);
   void SolveIlpInstance(std::shared_ptr<TPilpGraph> hgraph,
                         TP_partition& refined_partition,
                         const matrix<float>& max_block_balance);
@@ -671,7 +783,9 @@ class TPilpRefine : public TPrefiner
               TP_partition& solution) override;
   void BalancePartition(const HGraph hgraph,
                         const matrix<float>& max_block_balance,
-                        std::vector<int>& solution) override;
+                        std::vector<int>& solution) override
+  {
+  }
   void RollbackMoves(std::vector<VertexGain>& trace,
                      matrix<int>& net_degs,
                      int& best_move,
@@ -679,7 +793,9 @@ class TPilpRefine : public TPrefiner
                      HGraph hgraph,
                      matrix<float>& curr_block_balance,
                      std::vector<float>& cur_path_cost,
-                     std::vector<int>& solution) override;
+                     std::vector<int>& solution) override
+  {
+  }
   void SetHyperedgeThr(const int thr) { he_thr_ = thr; }
   int GetHyperedgeThr() const { return he_thr_; }
   int GetWavefront() const { return wavefront_; }
@@ -710,4 +826,83 @@ class TPilpRefine : public TPrefiner
 };
 
 using TP_ilp_refiner_ptr = std::shared_ptr<TPilpRefine>;
+
+// structure to save partition pair for pairwise FM
+/*
+class TPpartitionPair
+{
+ public:
+  TPpartitionPair() = default;
+  TPpartitionPair(const i, const int x, const int y, const float xcon)
+      : pair_id_(i), pair_x_(x), pair_y_(y), connectivity_(xcon)
+  {
+  }
+  TPpartitionPair(const TPpartitionPair&) = default;
+  TPpartitionPair(TPpartitionPair&&) = default;
+  TPpartitionPair& operator=(const TPpartitionPair&) = default;
+  TPpartitionPair& operator=(TPpartitionPair&&) = default;
+  ~TPpartitionPair() = default;\
+  void SetId(const int i) { pair_id_ = i; }
+  int GetId() const { return pair_id_; }
+  void SetPairX(const int x) { pair_x_ = x; }
+  void SetPairY(const int y) { pair_y_ = y; }
+  int GetPairX() const { return pair_x_; }
+  int GetPairY() const { return pair_y_; }
+  void SetConnectivity(const float connection) { connectivity_ = connection; }
+  float GetConnectivity() const { return connectivity_; }
+
+ private:
+  int pair_id_;
+  int pair_x_;
+  int pair_y_;
+  float connectivity_;
+};
+
+using TP_partition_pair_ptr = std::shared_ptr<TPpartitionPair>;
+
+class TPkpm : public TPrefiner, public TPtwoWayFM
+{
+ public:
+  TPkpm() = default;
+  TPkpm(const int num_parts,
+        const int refiner_iters,
+        const int max_moves,
+        const int refiner_choice,
+        const int seed,
+        const std::vector<float> e_wt_factors,
+        const float path_wt_factor,
+        const float snaking_wt_factor,
+        utl::Logger* logger)
+      : TPrefiner(num_parts,
+                  refiner_iters,
+                  refiner_choice,
+                  seed,
+                  e_wt_factors,
+                  path_wt_factor,
+                  snaking_wt_factor,
+                  logger)
+  {
+    max_moves_ = max_moves;
+  }
+  TPkpm(const TPkpm&) = default;
+  TPkpm(TPkpm&&) = default;
+  TPkpm& operator=(const TPkpm&) = default;
+  TPkpm& operator=(TPkpm&&) = default;
+  ~TPkpm() = default;
+  void Refine(const HGraph hgraph,
+              const matrix<float>& max_vertex_balance,
+              TP_partition& solution) override;
+  void BalancePartition(const HGraph hgraph,
+                        const matrix<float>& max_block_balance,
+                        std::vector<int>& solution) override;
+
+ private:
+  void FindTightlyConnectedPairs(const HGraph hgraph,
+                                 std::vector<int>& solution);
+  float CalculateSpan(const HGraph hgraph,
+                      int& from_pid,
+                      int& to_pid,
+                      std::vector<int>& solution);
+  int max_moves_;
+};*/
 }  // namespace par

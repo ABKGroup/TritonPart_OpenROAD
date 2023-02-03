@@ -87,10 +87,10 @@ TP_partition_token TPpartitioner::GoldenEvaluator(const HGraph hgraph,
   // check if the solution is valid
   for (auto value : solution)
     if (value < 0 || value >= num_parts_)
-      std::cout << "Error! The solution is invalid!" << std::endl;
+      logger_->report("Error! The solution is invalid!");
   if (print_flag == true) {
     // print cost
-    std::cout << "[Cutsize of partition : " << cost << "]" << std::endl;
+    logger_->report("[Cutcost of partition : ]", cost);
     // print block balance
     std::vector<float> tot_vertex_weights = hgraph->GetTotalVertexWeights();
     for (auto block_id = 0; block_id < block_balance.size(); block_id++) {
@@ -103,10 +103,42 @@ TP_partition_token TPpartitioner::GoldenEvaluator(const HGraph hgraph,
            << block_balance[block_id][dim] << " )  ";
         line += ss.str() + "  ";
       }
-      std::cout << line << std::endl;
+      logger_->report(line);
     }  // finish block balance
   }
   return std::pair<float, std::vector<std::vector<float>>>(cost, block_balance);
+}
+
+void TPpartitioner::TimingCutsEvaluator(const HGraph hgraph,
+                                        std::vector<int>& solution)
+{
+  int total_cuts = 0;
+  int total_critical_paths_cut = 0;
+  int worst_cut = -std::numeric_limits<int>::max();
+  for (int i = 0; i < hgraph->num_timing_paths_; ++i) {
+    const int first_valid_entry = hgraph->vptr_p_[i];
+    const int first_invalid_entry = hgraph->vptr_p_[i + 1];
+    std::vector<int> block_path;
+    for (int j = first_valid_entry; j < first_invalid_entry; ++j) {
+      int v = hgraph->vind_p_[j];
+      int block_id = solution[v];
+      if (block_path.size() == 0 || block_path.back() != block_id) {
+        block_path.push_back(block_id);
+      }
+    }
+    int cut_on_path = block_path.size() - 1;
+    total_cuts += cut_on_path;
+    if (cut_on_path > worst_cut) {
+      worst_cut = cut_on_path;
+    }
+    if (cut_on_path > 0) {
+      ++total_critical_paths_cut;
+    }
+  }
+  float average_cuts_on_path = total_cuts / hgraph->num_timing_paths_;
+  logger_->report("[INFO] Total critical paths cut {}",
+                  total_critical_paths_cut);
+  logger_->report("[INFO] Worst cut on a critical path {}", worst_cut);
 }
 
 // Get block balance
@@ -157,7 +189,10 @@ float TPpartitioner::CalculatePathCost(int path_id,
     return cost;
 
   // num_cut = path.size() - 1
-  cost = path_wt_factor_ * static_cast<float>(path.size() - 1);
+  // cost = path_wt_factor_ * static_cast<float>(path.size() - 1);
+  cost = path_wt_factor_
+         * std::pow(hgraph->timing_attr_[path_id],
+                    2.0 * static_cast<float>(path.size() - 1));
   // get the snaking factor of the path (maximum repetition of block_id - 1)
   int snaking_factor = 0;
   for (auto [block_id, count] : block_counter)
@@ -197,24 +232,54 @@ void TPpartitioner::RandomPart(const HGraph hgraph,
       std::vector<float>(hgraph->vertex_dimensions_, static_cast<float>(0)));
   // determine all the free vertices
   std::vector<int> unvisited;
-  unvisited.reserve(hgraph->num_vertices_);
-  if (hgraph->fixed_vertex_flag_ == true) {
-    for (auto v = 0; v < hgraph->num_vertices_; ++v) {
-      if (hgraph->fixed_attr_[v] > -1) {
-        solution[v] = hgraph->fixed_attr_[v];
-        block_balance[solution[v]]
-            = block_balance[solution[v]] + hgraph->vertex_weights_[v];
-      } else {
-        unvisited.push_back(v);
+
+  // if timing paths are present then shuffle vertices according to the path
+  // groups they belong to a path group is defined as the superset of vertices
+  // of all path graphs
+
+  if (hgraph->num_timing_paths_ > 0) {
+    // Fill in order of vertices in the paths
+    std::set<int> path_vertices;
+    std::vector<int> visited(hgraph->num_vertices_, 0);
+    for (int i = 0; i < hgraph->num_timing_paths_; ++i) {
+      const int first_valid_entry = hgraph->vptr_p_[i];
+      const int first_invalid_entry = hgraph->vptr_p_[i + 1];
+      for (int j = first_valid_entry; j < first_invalid_entry; ++j) {
+        int v = hgraph->vind_p_[j];
+        visited[v] = 1;
+        path_vertices.insert(v);
       }
-    }  // done traversal
+    }
+    for (int i = 0; i < hgraph->num_vertices_; ++i) {
+      if (visited[i] == 0) {
+        unvisited.push_back(i);
+      }
+    }
+    // random shuffle
+    shuffle(
+        unvisited.begin(), unvisited.end(), std::default_random_engine(seed_));
+    unvisited.insert(
+        unvisited.begin(), path_vertices.begin(), path_vertices.end());
   } else {
-    unvisited.resize(hgraph->num_vertices_);
-    std::iota(unvisited.begin(), unvisited.end(), 0);  // Fill with 0, 1, ...
+    if (hgraph->fixed_vertex_flag_ == true) {
+      for (auto v = 0; v < hgraph->num_vertices_; ++v) {
+        if (hgraph->fixed_attr_[v] > -1) {
+          solution[v] = hgraph->fixed_attr_[v];
+          block_balance[solution[v]]
+              = block_balance[solution[v]] + hgraph->vertex_weights_[v];
+        } else {
+          unvisited.push_back(v);
+        }
+      }  // done traversal
+    } else {
+      unvisited.resize(hgraph->num_vertices_);
+      std::iota(unvisited.begin(), unvisited.end(), 0);  // Fill with 0, 1, ...
+    }
+    // random shuffle
+    shuffle(
+        unvisited.begin(), unvisited.end(), std::default_random_engine(seed_));
   }
-  // random shuffle
-  shuffle(
-      unvisited.begin(), unvisited.end(), std::default_random_engine(seed_));
+
   // assign vertex to blocks
   int block_id = 0;
   for (auto v : unvisited) {
@@ -237,6 +302,14 @@ void TPpartitioner::InitPartVileTwoWay(const HGraph hgraph,
   tritonpart_two_way_refiner_->BalancePartition(
       hgraph, max_block_balance, solution);
   tritonpart_two_way_refiner_->Refine(hgraph, max_block_balance, solution);
+}
+
+void TPpartitioner::InitPartVileKWay(const HGraph hgraph,
+                                     const matrix<float>& max_block_balance,
+                                     std::vector<int>& solution)
+{
+  // Fill partition 0 with all vertices
+  std::fill(solution.begin(), solution.end(), 0);
 }
 
 // CPLEX with warm start
