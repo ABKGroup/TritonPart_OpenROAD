@@ -442,7 +442,7 @@ TP_gain_cell TPrefiner::CalculateGain(int v,
   std::map<int, float> path_cost;  // map path_id to latest score
   if (from_pid == to_pid)
     return std::shared_ptr<VertexGain>(new VertexGain(v, 0.0, path_cost));
-  // define two lamda function
+  // define two lambda function
   // 1) for checking connectivity
   // 2) for calculating the score of a hyperedge
   // function : check the connectivity for the hyperedge
@@ -455,15 +455,12 @@ TP_gain_cell TPrefiner::CalculateGain(int v,
   };
   // function : calculate the score for the hyperedge
   auto GetHyperedgeScore = [&](int e) {
-    /*return std::inner_product(hgraph->hyperedge_weights_[e].begin(),
-                              hgraph->hyperedge_weights_[e].end(),
-                              e_wt_factors_.begin(),
-                              0.0);*/
     return std::inner_product(hgraph->hyperedge_weights_[e].begin(),
                               hgraph->hyperedge_weights_[e].end(),
                               e_wt_factors_.begin(),
                               0.0);
   };
+  
   // traverse all the hyperedges connected to v
   const int first_valid_entry = hgraph->vptr_[v];
   const int first_invalid_entry = hgraph->vptr_[v + 1];
@@ -472,15 +469,16 @@ TP_gain_cell TPrefiner::CalculateGain(int v,
     const int connectivity = GetConnectivity(e);
     const float e_score = GetHyperedgeScore(e);
     const int he_size = hgraph->eptr_[e + 1] - hgraph->eptr_[e];
+
     if (he_size > thr_he_size_skip_) {
       continue;
     }
-    if (connectivity == 1
-        && net_degs[e][from_pid]
-               > 1) {  // move from_pid to to_pid will have negative score
+    if (connectivity == 1 && net_degs[e][from_pid] > 1) {  
+      // move from_pid to to_pid will have negative score
       cut_score -= e_score;
     } else if (connectivity == 2 && net_degs[e][from_pid] == 1
                && net_degs[e][to_pid] > 0) {
+      // move from_pid to to_pid will increase the score
       cut_score += e_score;
     }
   }
@@ -496,11 +494,12 @@ TP_gain_cell TPrefiner::CalculateGain(int v,
       timing_score += (cur_path_cost[path_id] - cost);
     }
   }
-  float cut_cost_factor = 1.0;
-  float timing_cost_factor = 1.0;
+  // Comment from Zhiang
+  // To do list (20230204) : cut_cost_factor and timing_cost_factor should be defined as parameters
+  // This should be defined as parameters
+  const float cut_cost_factor = 1.0;
+  const float timing_cost_factor = 1.0;
   float score = cut_cost_factor * cut_score + timing_cost_factor * timing_score;
-  // std::cout << "[debug] scores " << cut_score << " and " << timing_score <<
-  // std::endl;
   return std::shared_ptr<VertexGain>(
       new VertexGain(v, score, solution[v], path_cost));
 }
@@ -1339,17 +1338,15 @@ void TPkWayFM::Refine(const HGraph hgraph,
                       TP_partition& solution)
 {
   float gain_in_pass;
-  GeneratePathsAsEdges(hgraph);
-  // std::vector<int> path_cuts(hgraph->num_timing_paths_, 0);
   std::vector<float> paths_cost(hgraph->num_timing_paths_, 0.0);
   GeneratePathsAsEdges(hgraph);
-  // InitPathCuts(hgraph, path_cuts, solution);
   for (int i = 0; i < refiner_iters_; ++i) {
     InitPaths(hgraph, paths_cost, solution);
     gain_in_pass = Pass(hgraph, max_block_balance, solution, paths_cost);
-    hgraph->hyperedge_weights_ = hgraph->nonscaled_hyperedge_weights_;
+    if (hgraph->num_timing_paths_ > 0) {
+      hgraph->hyperedge_weights_ = hgraph->nonscaled_hyperedge_weights_;
+    }
   }
-  // hgraph->hyperedge_weights_ = hgraph->nonscaled_hyperedge_weights_;
 }
 
 void TPkWayFM::RollbackMovesKWay(std::vector<VertexGain>& trace,
@@ -1660,45 +1657,47 @@ void TPkWayFM::AcceptKWayMove(std::shared_ptr<VertexGain> gain_cell,
   }*/
 }
 
+
+// Comment from Zhiang : No Magical Numbers !!!
+// To do list (20230204):
+// (1) define variables for these literal numbers
+// (2) make these variables tunable, so put them into
+//     the class member variables
 float TPkWayFM::Pass(const HGraph hgraph,
                      const matrix<float>& max_block_balance,
                      TP_partition& solution,
                      std::vector<float>& paths_cost)
 {
-  /*std::vector<float> paths_cost;
-  paths_cost.resize(hgraph->num_timing_paths_);
-  // std::vector<int> path_cuts;*/
-  /*for (int path_id = 0; path_id < hgraph->num_timing_paths_; path_id++) {
-    paths_cost[path_id] = CalculatePathCost(path_id, hgraph, solution);
-  }*/
   matrix<float> block_balance = GetBlockBalance(hgraph, solution);
+  // XXX Please rewrite this
   int limit = std::min(
       std::max(static_cast<int>(0.01 * hgraph->num_vertices_), 15), 100);
   matrix<float> max_block_balance_tol = max_block_balance;
-  SetTolerance(0.25);
+  // XXX Please rewrite this
+  SetTolerance(0.25); 
   for (int j = 0; j < num_parts_; ++j) {
     MultiplyFactor(max_block_balance_tol[j], 1.0 + GetTolerance());
   }
   matrix<int> net_degs = GetNetDegrees(hgraph, solution);
   TP_gain_buckets buckets;
   for (int i = 0; i < num_parts_; ++i) {
-    TP_gain_bucket bucket
-        = std::make_shared<TPpriorityQueue>(hgraph->num_vertices_, hgraph);
+    TP_gain_bucket bucket = std::make_shared<TPpriorityQueue>(hgraph->num_vertices_, hgraph);
     buckets.push_back(bucket);
   }
   // Initialize boundary flag
   InitBoundaryFlags(hgraph->num_vertices_);
   // Initialize the visit flags to false meaning no vertex has been visited
   InitVisitFlags(hgraph->num_vertices_);
+  // XXX Please add the comments to explain the meaning of 0 and 1
   auto partition_pair = std::make_pair(0, 1);
-  std::vector<int> boundary_vertices
-      = FindBoundaryVertices(hgraph, net_degs, partition_pair);
+  std::vector<int> boundary_vertices = FindBoundaryVertices(hgraph, net_degs, partition_pair);
 
   // Initialize current gain in a multi-thread manner
   // set based on max heap (k set)
   // each block has its own max heap
-  InitializeGainBucketsKWay(
-      hgraph, solution, net_degs, boundary_vertices, paths_cost, buckets);
+  
+  InitializeGainBucketsKWay(hgraph, solution, net_degs, boundary_vertices, paths_cost, buckets);
+  
   VertexGain global_best_ver_gain(-1, -std::numeric_limits<float>::max());
   std::vector<int> pre_fm = solution;
   std::vector<int> move_trace;  // store the moved vertices in sequence

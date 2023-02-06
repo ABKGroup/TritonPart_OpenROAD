@@ -48,6 +48,11 @@
 #include <ortools/linear_solver/linear_solver.h>
 #include <ortools/linear_solver/linear_solver.pb.h>
 
+#include "ortools/base/logging.h"
+#include "ortools/sat/cp_model.h"
+#include "ortools/sat/cp_model.pb.h"
+#include "ortools/sat/cp_model_solver.h"
+
 // for ILP solver in CPLEX
 #include "ilcplex/cplex.h"
 #include "ilcplex/ilocplex.h"
@@ -62,6 +67,13 @@ using operations_research::MPConstraint;
 using operations_research::MPObjective;
 using operations_research::MPSolver;
 using operations_research::MPVariable;
+using operations_research::sat::CpModelBuilder;
+using operations_research::sat::BoolVar;
+using operations_research::sat::LinearExpr;
+using operations_research::sat::CpSolverResponse;
+using operations_research::sat::Solve;
+using operations_research::sat::CpSolverStatus;
+using operations_research::sat::SolutionBooleanValue;
 
 TP_partition_token TPpartitioner::GoldenEvaluator(const HGraph hgraph,
                                                   std::vector<int>& solution,
@@ -210,7 +222,8 @@ void TPpartitioner::Partition(const HGraph hgraph,
   if (partitioner == INIT_RANDOM) {
     RandomPart(hgraph, max_block_balance, solution);
   } else if (partitioner == INIT_DIRECT_ILP) {
-    OptimalPartCplex(hgraph, max_block_balance, solution);
+    OptimalPartCplexWarmStart(hgraph, max_block_balance, solution);
+    //OptimalPartCplex(hgraph, max_block_balance, solution);
   } else if (partitioner == INIT_VILE) {
     InitPartVileTwoWay(hgraph, max_block_balance, solution);
   }
@@ -229,7 +242,7 @@ void TPpartitioner::RandomPart(const HGraph hgraph,
   // the summation of vertex weights for vertices in current block
   matrix<float> block_balance(
       num_parts_,
-      std::vector<float>(hgraph->vertex_dimensions_, static_cast<float>(0)));
+      std::vector<float>(hgraph->vertex_dimensions_, 0.0f));
   // determine all the free vertices
   std::vector<int> unvisited;
 
@@ -284,12 +297,12 @@ void TPpartitioner::RandomPart(const HGraph hgraph,
   int block_id = 0;
   for (auto v : unvisited) {
     solution[v] = block_id;
-    block_balance[solution[v]]
-        = block_balance[solution[v]] + hgraph->vertex_weights_[v];
+    block_balance[solution[v]] = block_balance[solution[v]] + hgraph->vertex_weights_[v];
     if (block_balance[block_id]
         >= DivideFactor(max_block_balance[block_id], 10.0))
       block_id = (++block_id) % num_parts_;  // adjust the block_id
   }
+  logger_->report("RandomPart finishs !");
 }
 
 void TPpartitioner::InitPartVileTwoWay(const HGraph hgraph,
@@ -312,7 +325,311 @@ void TPpartitioner::InitPartVileKWay(const HGraph hgraph,
   std::fill(solution.begin(), solution.end(), 0);
 }
 
+
+// CP with warm start and hyperedge reduction
+// Optimal ILP-based partitioning using CP-SAT
+void TPpartitioner::OptimalPartCplexWarmStart(
+    const HGraph hgraph,
+    const matrix<float>& max_block_balance,
+    std::vector<int>& solution)
+{
+  logger_->report("Optimal ILP-based Partitioning (OR-Tools) with warm-start ...");
+  matrix<int> x(num_parts_, std::vector<int>(hgraph->num_vertices_, 0));
+  matrix<int> y(num_parts_, std::vector<int>(hgraph->num_hyperedges_, 0));
+  for (int i = 0; i < hgraph->num_vertices_; ++i) {
+    x[solution[i]][i] = 1;  // set vertex i to partition solution[i]
+  }
+  
+  for (int i = 0; i < hgraph->num_hyperedges_; ++i) {
+    const int firstValidEntry = hgraph->eptr_[i];
+    const int firstInvalidEntry = hgraph->eptr_[i + 1];
+    std::set<int> unique_partitions;
+    for (int j = firstValidEntry; j < firstInvalidEntry; ++j) {
+      const int p = solution[hgraph->eind_[j]];
+      unique_partitions.insert(p);
+    }
+    for (const int& j : unique_partitions) {
+      y[j][i] = 1; // set hyperedge i to partition solution[j]
+    }
+  }
+
+  // Identify the most important hyperedges
+  // only consider the top 100 hyperedges based on weight
+  // order hyperedges based on decreasing order
+  struct comp
+  {
+    // comparator function
+    bool operator()(const std::pair<int, float>& l,
+                    const std::pair<int, float>& r) const
+    {
+      if (l.second != r.second)
+        return l.second > r.second;
+      return l.first < r.first;
+    }
+  };
+
+  // use set data structure to sort unvisited vertices
+  std::set<std::pair<int, float>, comp> unvisited_hyperedges;
+  for (auto e = 0; e < hgraph->num_hyperedges_; ++e) {
+    const float score
+        = std::inner_product(hgraph->hyperedge_weights_[e].begin(),
+                             hgraph->hyperedge_weights_[e].end(),
+                             e_wt_factors_.begin(),
+                             0.0);
+    unvisited_hyperedges.insert(std::pair<int, float>(e, score));
+  }
+
+  int max_num_hyperedges = 0;
+  std::vector<int> edge_mask;
+  float base_score = (*unvisited_hyperedges.begin()).second / 10.0;
+  for (auto& value : unvisited_hyperedges) {
+    if (base_score >= value.second) {
+      edge_mask.push_back(value.first);
+      max_num_hyperedges++;
+    }
+  }
+
+  // Build CP Model
+  CpModelBuilder cp_model;
+  // Variables
+  // x[i][j] is an array of Boolean variables
+  // x[i][j] is true if vertex i to partition j
+  std::vector<std::vector<BoolVar> > var_x(num_parts_, std::vector<BoolVar>(hgraph->num_vertices_));
+  std::vector<std::vector<BoolVar> > var_y(num_parts_, std::vector<BoolVar>(edge_mask.size()));
+  for (auto i = 0; i < num_parts_; i++) {
+    // initialize var_x
+    for (auto j = 0; j < hgraph->num_vertices_; j++)
+      var_x[i][j] = cp_model.NewBoolVar();
+    // initialize var_y
+    for (auto j = 0; j < edge_mask.size(); j++)
+      var_y[i][j] = cp_model.NewBoolVar();
+  }
+
+  // define constraints
+  // balance constraint
+  // check each dimension
+  for (auto k = 0; k < hgraph->vertex_dimensions_; k++) {
+    // allowed balance for each dimension
+    for (auto i = 0; i < num_parts_; i++) {
+      LinearExpr balance_expr;
+      for (int j = 0; j < hgraph->num_vertices_; j++) {
+        balance_expr += hgraph->vertex_weights_[j][k] * var_x[i][j];
+      } // finish traversing vertices
+      cp_model.AddLessOrEqual(balance_expr, max_block_balance[i][k]);
+    }
+  }
+  // Fixed vertices constraints
+  if (hgraph->fixed_vertex_flag_ == true) {
+    for (int j = 0; j < hgraph->num_vertices_; ++j) {
+      if (hgraph->fixed_attr_[j] > -1) {
+        for (int i = 0; i < num_parts_; i++) {
+          cp_model.FixVariable(var_x[i][j], i == hgraph->fixed_attr_[j]);
+        }
+      }  // fixed vertices should be placed at the specified block
+    }
+  }
+  // each vertex can only belong to one part
+  for (auto j = 0; j < hgraph->num_vertices_; j++) {
+    std::vector<BoolVar> possible_partitions;
+    for (auto i = 0; i < num_parts_; i++) {
+      possible_partitions.push_back(var_x[i][j]);
+    }
+    cp_model.AddExactlyOne(possible_partitions);
+  }
+  // Hyperedge constraint
+  for (int i = 0; i < edge_mask.size(); ++i) {
+    const int e = edge_mask[i];
+    const int start_idx = hgraph->eptr_[e];
+    const int end_idx = hgraph->eptr_[e + 1];
+    for (int j = start_idx; j < end_idx; j++) {
+      const int vertex_id = hgraph->eind_[j];
+      for (int k = 0; k < num_parts_; k++) {
+        cp_model.AddLessOrEqual(var_y[k][i], var_x[k][vertex_id]);
+      }
+    }
+  }
+  // Objective (Maximize objective function -> Minimize cutsize)
+  LinearExpr obj_expr;
+  for (int i = 0; i < edge_mask.size(); ++i) {
+    const float cost_value
+        = std::inner_product(hgraph->hyperedge_weights_[edge_mask[i]].begin(),
+                             hgraph->hyperedge_weights_[edge_mask[i]].end(),
+                             e_wt_factors_.begin(),
+                             0.0);
+    for (int j = 0; j < num_parts_; ++j) {
+      obj_expr += var_y[j][i] * cost_value;
+    }
+  }
+  cp_model.Maximize(obj_expr);
+
+  // Add hints
+  for (auto i = 0; i < num_parts_; i++) {
+    // hint for var_x
+    for (auto j = 0; j < hgraph->num_vertices_; j++)
+      cp_model.AddHint(var_x[i][j], x[i][j]);
+    // hint for var_y
+    for (auto j = 0; j < edge_mask.size(); ++j) 
+      cp_model.AddHint(var_y[i][j], y[i][edge_mask[j]]);
+  } 
+  
+  // solve
+  const CpSolverResponse response = Solve(cp_model.Build());
+  // Print solution.
+  if (response.status() == CpSolverStatus::INFEASIBLE) {
+    logger_->report("No feasible solution found with ILP --> Running K-way FM instead");
+  } else {
+    for (auto i = 0; i < hgraph->num_vertices_; i++) {
+      for (auto j = 0; j < num_parts_; j++) {
+        if (SolutionBooleanValue(response, var_x[j][i])) {
+          solution[i] = j;
+        }
+      }
+    }
+  }
+  // close the model
+}
+
+// Solve the ILP-based partitioning with hyperedge reduction
+void TPpartitioner::OptimalPartCplex(const HGraph hgraph,
+                                     const matrix<float>& max_block_balance,
+                                     std::vector<int>& solution)
+{
+  logger_->report("Optimal ILP-based Partitioning (OR-Tools) with hyperedge reduction ...");
+  // reset variable
+  solution.clear();
+  solution.resize(hgraph->num_vertices_);
+  std::fill(solution.begin(), solution.end(), -1);
+  
+  // Identify the most important hyperedges
+  // only consider the top 100 hyperedges based on weight
+  // order hyperedges based on decreasing order
+  struct comp
+  {
+    // comparator function
+    bool operator()(const std::pair<int, float>& l,
+                    const std::pair<int, float>& r) const
+    {
+      if (l.second != r.second)
+        return l.second > r.second;
+      return l.first < r.first;
+    }
+  };
+
+  // use set data structure to sort unvisited vertices
+  std::set<std::pair<int, float>, comp> unvisited_hyperedges;
+  for (auto e = 0; e < hgraph->num_hyperedges_; ++e) {
+    const float score
+        = std::inner_product(hgraph->hyperedge_weights_[e].begin(),
+                             hgraph->hyperedge_weights_[e].end(),
+                             e_wt_factors_.begin(),
+                             0.0);
+    unvisited_hyperedges.insert(std::pair<int, float>(e, score));
+  }
+
+  int max_num_hyperedges = 0;
+  std::vector<int> edge_mask;
+  float base_score = (*unvisited_hyperedges.begin()).second / 10.0;
+  for (auto& value : unvisited_hyperedges) {
+    if (base_score >= value.second) {
+      edge_mask.push_back(value.first);
+      max_num_hyperedges++;
+    }
+  }
+
+  // Build CP Model
+  CpModelBuilder cp_model;
+  // Variables
+  // x[i][j] is an array of Boolean variables
+  // x[i][j] is true if vertex i to partition j
+  std::vector<std::vector<BoolVar> > var_x(num_parts_, std::vector<BoolVar>(hgraph->num_vertices_));
+  std::vector<std::vector<BoolVar> > var_y(num_parts_, std::vector<BoolVar>(edge_mask.size()));
+  for (auto i = 0; i < num_parts_; i++) {
+    // initialize var_x
+    for (auto j = 0; j < hgraph->num_vertices_; j++)
+      var_x[i][j] = cp_model.NewBoolVar();
+    // initialize var_y
+    for (auto j = 0; j < edge_mask.size(); j++)
+      var_y[i][j] = cp_model.NewBoolVar();
+  }
+
+  // define constraints
+  // balance constraint
+  // check each dimension
+  for (auto k = 0; k < hgraph->vertex_dimensions_; k++) {
+    // allowed balance for each dimension
+    for (auto i = 0; i < num_parts_; i++) {
+      LinearExpr balance_expr;
+      for (int j = 0; j < hgraph->num_vertices_; j++) {
+        balance_expr += hgraph->vertex_weights_[j][k] * var_x[i][j];
+      } // finish traversing vertices
+      cp_model.AddLessOrEqual(balance_expr, max_block_balance[i][k]);
+    }
+  }
+  // Fixed vertices constraints
+  if (hgraph->fixed_vertex_flag_ == true) {
+    for (int j = 0; j < hgraph->num_vertices_; ++j) {
+      if (hgraph->fixed_attr_[j] > -1) {
+        for (int i = 0; i < num_parts_; i++) {
+          cp_model.FixVariable(var_x[i][j], i == hgraph->fixed_attr_[j]);
+        }
+      }  // fixed vertices should be placed at the specified block
+    }
+  }
+  // each vertex can only belong to one part
+  for (auto j = 0; j < hgraph->num_vertices_; j++) {
+    std::vector<BoolVar> possible_partitions;
+    for (auto i = 0; i < num_parts_; i++) {
+      possible_partitions.push_back(var_x[i][j]);
+    }
+    cp_model.AddExactlyOne(possible_partitions);
+  }
+  // Hyperedge constraint
+  for (int i = 0; i < edge_mask.size(); ++i) {
+    const int e = edge_mask[i];
+    const int start_idx = hgraph->eptr_[e];
+    const int end_idx = hgraph->eptr_[e + 1];
+    for (int j = start_idx; j < end_idx; j++) {
+      const int vertex_id = hgraph->eind_[j];
+      for (int k = 0; k < num_parts_; k++) {
+        cp_model.AddLessOrEqual(var_y[k][i], var_x[k][vertex_id]);
+      }
+    }
+  }
+  // Objective (Maximize objective function -> Minimize cutsize)
+  LinearExpr obj_expr;
+  for (int i = 0; i < edge_mask.size(); ++i) {
+    const float cost_value
+        = std::inner_product(hgraph->hyperedge_weights_[edge_mask[i]].begin(),
+                             hgraph->hyperedge_weights_[edge_mask[i]].end(),
+                             e_wt_factors_.begin(),
+                             0.0);
+    for (int j = 0; j < num_parts_; ++j) {
+      obj_expr += var_y[j][i] * cost_value;
+    }
+  }
+  cp_model.Maximize(obj_expr);
+  // solve
+  const CpSolverResponse response = Solve(cp_model.Build());
+  // Print solution.
+  if (response.status() == CpSolverStatus::INFEASIBLE) {
+    logger_->report("No feasible solution found with ILP --> Running K-way FM instead");
+  } else {
+    for (auto i = 0; i < hgraph->num_vertices_; i++) {
+      for (auto j = 0; j < num_parts_; j++) {
+        if (SolutionBooleanValue(response, var_x[j][i])) {
+          solution[i] = j;
+        }
+      }
+    }
+  }
+  // close the model
+}
+
+
+// Commented out by Zhiang (20230203, 5:01PM)
+// Now Zhiang is replacing it by CP in Google OR-Tools
 // CPLEX with warm start
+/*
 void TPpartitioner::OptimalPartCplexWarmStart(
     const HGraph hgraph,
     const matrix<float>& max_block_balance,
@@ -450,6 +767,7 @@ void TPpartitioner::OptimalPartCplex(const HGraph hgraph,
                                      const matrix<float>& max_block_balance,
                                      std::vector<int>& solution)
 {
+  std::cout << "Enter OptimalPartCplex" << std::endl;
   // reset variable
   solution.clear();
   solution.resize(hgraph->num_vertices_);
@@ -585,4 +903,5 @@ void TPpartitioner::OptimalPartCplex(const HGraph hgraph,
   mycplex.clear();
   myenv.end();
 }
+*/
 }  // namespace par

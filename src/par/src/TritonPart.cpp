@@ -897,6 +897,7 @@ void TritonPart::tritonPartHypergraph(const char* hypergraph_file_arg,
                                       unsigned int seed_arg)
 {
   // This segment of the code is merely used for testing purposes
+  /*
   bool read_timing_paths_flag = true;
   matrix<int> timing_paths;
   if (read_timing_paths_flag == true) {
@@ -912,6 +913,7 @@ void TritonPart::tritonPartHypergraph(const char* hypergraph_file_arg,
       timing_paths.push_back(vertices);
     }
   }
+  */
   std::vector<int> partition;
   if (num_parts_arg == 2) {
     partition = TritonPart_hypergraph_PartTwoWay(hypergraph_file_arg,
@@ -935,9 +937,11 @@ void TritonPart::tritonPartHypergraph(const char* hypergraph_file_arg,
       = "design" + std::string(".hgr.part.") + std::to_string(num_parts_);
   WriteSolution(solution_file.c_str(), partition);
 
+  /*
   if (read_timing_paths_flag == true) {
     AnalyzeTimingOfPartition(timing_paths, partition);
   }
+  */
   exit(EXIT_SUCCESS);
 }
 
@@ -1547,6 +1551,7 @@ std::vector<int> TritonPart::TritonPart_design_PartKWay(
     int hyperedge_dimensions_,
     unsigned int seed_)
 {
+  logger_->report("TritonPart_design_PartKWay starts !!!");
   auto start_time_stamp_global = std::chrono::high_resolution_clock::now();
   // create coarsening class
   const std::vector<float> e_wt_factors(hyperedge_dimensions_, 1.0);
@@ -1672,9 +1677,10 @@ std::vector<int> TritonPart::TritonPart2Way(
   seed_ = seed;
   vertex_dimensions_ = 1;
   hyperedge_dimensions_ = 1;
+  placement_dimensions_ = 0;  // no placememnt information is provided for this function
   num_vertices_ = num_vertices;
   num_hyperedges_ = num_hyperedges;
-  hyperedges_ = hyperedges;
+  //hyperedges_ = hyperedges;
   // local parameters
   logger_->report("Partition Parameters**");
   logger_->report("Number of partitions = {}", num_parts_);
@@ -1708,15 +1714,14 @@ std::vector<int> TritonPart::TritonPart2Way(
   }
   vertex_weights_.clear();
   for (auto& weight : vertex_weights) {
-    std::vector<float> temp_weight{weight};
+    std::vector<float> temp_weight { weight };
     vertex_weights_.push_back(temp_weight);
   }
 
   // Convert the timing information (no timing information)
   std::vector<int> vind_p;  // each timing path is a sequences of vertices
   std::vector<int> vptr_p;
-  std::vector<int>
-      pind_v;  // store all the timing paths connected to the vertex
+  std::vector<int> pind_v;  // store all the timing paths connected to the vertex
   std::vector<int> pptr_v;
   std::vector<float> timing_attr;
   // create TPHypergraph
@@ -1750,8 +1755,7 @@ std::vector<int> TritonPart::TritonPart2Way(
   const std::vector<float> p_wt_factors(placement_dimensions_ + 100, 1.0);
   const float timing_factor = 1.0;
   const int path_traverse_step = 2;
-  const std::vector<float> tot_vertex_weights
-      = hypergraph_->GetTotalVertexWeights();
+  const std::vector<float> tot_vertex_weights = hypergraph_->GetTotalVertexWeights();
   const int alpha = 4;
   const std::vector<float> max_vertex_weights
       = DivideFactor(hypergraph_->GetTotalVertexWeights(), alpha * num_parts_);
@@ -1833,6 +1837,7 @@ std::vector<int> TritonPart::TritonPart2Way(
                                         tritonpart_twoway_refiner,
                                         logger_);
   bool v_cycle_flag = true;
+  //RefinerType refine_type = 2_WAY_FM;
   RefinerType refine_type = KPM_REFINEMENT;
   int num_initial_solutions = 20;       // number of initial random solutions
   int num_best_initial_solutions = 10;  // number of best initial solutions
@@ -1855,8 +1860,7 @@ std::vector<int> TritonPart::TritonPart2Way(
                                                   refine_type,
                                                   logger_);
   bool vcycle = true;
-  matrix<float> vertex_balance
-      = hypergraph_->GetVertexBalance(num_parts_, ub_factor_);
+  matrix<float> vertex_balance = hypergraph_->GetVertexBalance(num_parts_, ub_factor_);
   std::vector<int> solution = tritonpart_mlevel_partitioner->PartitionTwoWay(
       hypergraph_, hypergraph_, vertex_balance, vcycle);
   auto end_timestamp_global = std::chrono::high_resolution_clock::now();

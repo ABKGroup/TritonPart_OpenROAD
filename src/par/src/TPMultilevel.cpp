@@ -167,10 +167,11 @@ TPmultilevelPartitioner::InitialPartTwoWay(HGraph coarsest_hgraph,
 
   // ILP initial partitioning
   std::vector<int> ilp_part = solution_set[best_solution_id];
-  if (coarsest_hgraph->num_hyperedges_ > 1000) {
-    partitioner_->SetPartitionerChoice(INIT_DIRECT_WARM_ILP);
+  //if (coarsest_hgraph->num_hyperedges_ > 1000) {
+  if (coarsest_hgraph->num_hyperedges_ > 0) {
+    partitioner_->SetPartitionerChoice(INIT_DIRECT_ILP);
+    //partitioner_->SetPartitionerChoice(INIT_DIRECT_WARM_ILP);
     partitioner_->Partition(coarsest_hgraph, max_vertex_balance, ilp_part);
-
   } else {
     partitioner_->SetPartitionerChoice(INIT_DIRECT_ILP);
     partitioner_->Partition(coarsest_hgraph, max_vertex_balance, ilp_part);
@@ -482,6 +483,7 @@ TPmultilevelPartitioner::InitialPartKWay(HGraph coarsest_hgraph,
   std::mt19937 gen;
   gen.seed(seed_);
   std::uniform_real_distribution<> dist(0.0, 1.0);
+  coarsest_hgraph->WriteHypergraph("coarsest");
   // set the solution set
   matrix<int> solution_set;
   std::vector<int> cutsize_vec;
@@ -507,11 +509,13 @@ TPmultilevelPartitioner::InitialPartKWay(HGraph coarsest_hgraph,
   }
   // ILP initial partitioning
   std::vector<int> ilp_part = solution_set[best_solution_id];
-  if (coarsest_hgraph->num_hyperedges_ > 1000) {
-    partitioner_->SetPartitionerChoice(INIT_DIRECT_WARM_ILP);
+  if (coarsest_hgraph->num_hyperedges_ > 0) {
+    std::cout << "INIT_DIRECT_WARM_ILP" << std::endl;
+    partitioner_->SetPartitionerChoice(INIT_DIRECT_ILP);
+    //partitioner_->SetPartitionerChoice(INIT_DIRECT_WARM_ILP);
     partitioner_->Partition(coarsest_hgraph, max_vertex_balance, ilp_part);
-
   } else {
+    std::cout << "INIT_DIRECT_ILP" << std::endl;
     partitioner_->SetPartitionerChoice(INIT_DIRECT_ILP);
     partitioner_->Partition(coarsest_hgraph, max_vertex_balance, ilp_part);
   }
@@ -640,6 +644,7 @@ void TPmultilevelPartitioner::MultilevelPartKWay(
     TP_partition& solution,
     bool VCycle)
 {
+  logger_->report("MultilevelPartKWay starts !!!");
   coarsener_->SetVertexOrderChoice(RANDOM);
   auto community = coarsener_->PathBasedCommunity(hgraph);
   hgraph->community_attr_ = community;
@@ -656,6 +661,7 @@ void TPmultilevelPartitioner::MultilevelPartKWay(
   k_way_refiner_->SetMaxMoves(50);
   auto init_partitions
       = InitialPartKWay(coarsest_hgraph, max_vertex_balance, solution);
+  logger_->report("sort the solutions based on cutsize");
   // sort the solution based on cutsize
   matrix<int> partitions_vec = init_partitions.first;
   std::vector<int> cutsize_vec = init_partitions.second;
