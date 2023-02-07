@@ -53,13 +53,13 @@
 #include "ortools/sat/cp_model.pb.h"
 #include "ortools/sat/cp_model_solver.h"
 
+// removed CPLEX
 // for ILP solver in CPLEX
-#include "ilcplex/cplex.h"
-#include "ilcplex/ilocplex.h"
+// #include "ilcplex/cplex.h"
+// #include "ilcplex/ilocplex.h"
 
 using utl::PAR;
 
-// par 2912
 
 namespace par {
 
@@ -102,7 +102,7 @@ TP_partition_token TPpartitioner::GoldenEvaluator(const HGraph hgraph,
       logger_->report("Error! The solution is invalid!");
   if (print_flag == true) {
     // print cost
-    logger_->report("[Cutcost of partition : ]", cost);
+    logger_->report("[Cutcost of partition : {}]", cost);
     // print block balance
     std::vector<float> tot_vertex_weights = hgraph->GetTotalVertexWeights();
     for (auto block_id = 0; block_id < block_balance.size(); block_id++) {
@@ -302,7 +302,6 @@ void TPpartitioner::RandomPart(const HGraph hgraph,
         >= DivideFactor(max_block_balance[block_id], 10.0))
       block_id = (++block_id) % num_parts_;  // adjust the block_id
   }
-  logger_->report("RandomPart finishs !");
 }
 
 void TPpartitioner::InitPartVileTwoWay(const HGraph hgraph,

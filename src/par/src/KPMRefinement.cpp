@@ -67,11 +67,11 @@ KPMpartition KPMRefinement::KPMevaluator(const HGraph hgraph,
   // check if the solution is valid
   for (auto value : solution)
     if (value < 0 || value >= num_parts_)
-      std::cout << "[ERROR] The solution is invalid!! " << std::endl;
+      logger_->report("[ERROR] The solution is invalid!! ");
 
   if (print_flag == true) {
     // print cost
-    std::cout << "[EVAL] Cutsize: " << cost << std::endl;
+    logger_->report("[EVAL] Cutsize: {}", cost);
     // print block balance
     std::vector<float> tot_vertex_weights = hgraph->GetTotalVertexWeights();
     for (auto block_id = 0; block_id < block_balance.size(); block_id++) {
@@ -85,8 +85,8 @@ KPMpartition KPMRefinement::KPMevaluator(const HGraph hgraph,
         line += ss.str() + "  ";
       }
       logger_->info(PAR, 2911, line);
-      std::cout << "cutsize : " << cost << std::endl;
-      std::cout << "balance : " << line << std::endl;
+      logger_->report("cutsize : {}", cost);
+      logger_->report("balance : {}", line);
     }  // finish block balance
   }
   return KPMpartition(cost, block_balance);
@@ -148,10 +148,7 @@ void kpm_heap::InsertIntoPQ(std::shared_ptr<vertex> vertex)
 {
   total_elements_++;
   vertices_.push_back(vertex);
-  // std::cout << "[DEBUG] Vertex " << vertex.GetVertex() << " with total ele "
-  // << total_elements_ << std::endl;
   vertices_map_[vertex->GetVertex()] = total_elements_ - 1;
-  // std::cout << "[DEBUG] Starting heapify up " << std::endl;
   HeapifyUp(total_elements_ - 1);
 }
 
@@ -170,9 +167,6 @@ std::shared_ptr<vertex> kpm_heap::ExtractMax()
 
 void kpm_heap::ChangePriority(int index, float priority)
 {
-  if (index > total_elements_ || index == -1) {
-    // std::cout << "[DEBUG] Index asked " << index << std::endl;
-  }
   float old_priority = vertices_[index]->GetGain();
   vertices_[index]->SetGain(priority);
   if (priority > old_priority) {
@@ -306,7 +300,6 @@ std::shared_ptr<vertex> KPMRefinement::KPMcalculateGain(
   // traverse all the hyperedges connected to v
   const int first_valid_entry = hgraph->vptr_[v];
   const int first_invalid_entry = hgraph->vptr_[v + 1];
-  // std::cout << std::endl << "[DEBUG] Vertex " << v << std::endl;
   for (auto e_idx = first_valid_entry; e_idx < first_invalid_entry; e_idx++) {
     const int e = hgraph->vind_[e_idx];  // hyperedge id
     const int connectivity = GetConnectivity(e);
@@ -467,30 +460,6 @@ std::vector<std::pair<int, int>> KPMRefinement::KPMfindPairs(
   }
 
   return pairs; 
-
-  /*auto debug_pair_queues = pair_queues;
-  // debug: printing partition pairs
-  std::cout << "[DEBUG] Printing PQs " << std::endl;
-  while (debug_pair_queues.empty() == false) {
-    std::cout << "PQ has " << pair_scores_diff[debug_pair_queues.top()]
-              << std::endl;
-    debug_pair_queues.pop();
-  }*/
-
-  // Pick best pairs and initialize gains
-  std::vector<bool> pair_mask(num_parts_, false);
-  for (int i = 0; i < max_pairs; ++i) {
-    auto partition_pair = pairs[i];
-    if (pair_mask[partition_pair.first] == true
-        || pair_mask[partition_pair.second] == true) {
-      continue;
-    }
-    ppairs.push_back(partition_pair);
-    pair_mask[partition_pair.first] = true;
-    pair_mask[partition_pair.second] = true;
-  }
-  prev_scores = pair_scores; 
-  return ppairs;
 }
 
 void KPMRefinement::KPMrefinement(const HGraph hgraph,
@@ -503,8 +472,6 @@ void KPMRefinement::KPMrefinement(const HGraph hgraph,
     KPMevaluator(hgraph, solution, false);
     // Find the pairs that are tightly connected with each other
     auto partition_pairs = KPMfindPairs(hgraph, solution, prev_scores);
-    // std::cout << "[DEBUG] Found pairs " << partition_pairs.size() <<
-    // std::endl;
     const float tot_gain
         = KPMpass(hgraph, partition_pairs, max_block_balance, solution);
     if (tot_gain < 0.0) {
@@ -518,9 +485,10 @@ void KPMRefinement::KPMrefinement(const HGraph hgraph,
       same_gain_passes = 0;
     }
   }
-  std::cout << "[K-PM-FM] Hypergraph (" << hgraph->num_vertices_ << ", "
-            << hgraph->num_hyperedges_ << "): Refined cut "
-            << KPMevaluator(hgraph, solution, false).first << std::endl;
+  logger_->report("[K-PM-FM] Hypergraph ( {} , {} ): Refined cut {}",
+                  hgraph->num_vertices_,
+                  hgraph->num_hyperedges_,
+                  KPMevaluator(hgraph, solution, false).first);
 }
 
 void KPMRefinement::KPMinitialGainsBetweenPairs(
@@ -713,18 +681,14 @@ void KPMRefinement::KPMfindNeighbors(const HGraph hgraph,
                                      std::vector<int>& solution,
                                      std::set<int>& neighbors)
 {
-  // std::cout << "[DEBUG] Finding nbrs " << std::endl;
   const int first_valid_entry = hgraph->vptr_[vertex];
   const int first_invalid_entry = hgraph->vptr_[vertex + 1];
   for (int i = first_valid_entry; i < first_invalid_entry; ++i) {
     const int he = hgraph->vind_[i];
     const int first_valid_entry_he = hgraph->eptr_[he];
     const int first_invalid_entry_he = hgraph->eptr_[he + 1];
-    // std::cout << "[DEBUG] He " << he << std::endl;
     for (int j = first_valid_entry_he; j < first_invalid_entry_he; ++j) {
       const int v = hgraph->eind_[j];
-      // std::cout << "[DEBUG] vtx " << v << " etc: " << GetVisitStatus(v) <<
-      // std::endl;
       if (v == vertex || GetVisitStatus(v) == true
           || (solution[v] != partition_pair.first
               && solution[v] != partition_pair.second)) {
@@ -733,7 +697,6 @@ void KPMRefinement::KPMfindNeighbors(const HGraph hgraph,
       neighbors.insert(v);
     }
   }
-  // std::cout << "[DEBUG] Nbrs has " << neighbors.size() << std::endl;
 }
 
 // Function update the gains of neighboring vertices of a candidate vertex
@@ -772,11 +735,8 @@ void KPMRefinement::KPMupdateNeighbors(
                                             net_degs);
       float new_gain = new_gain_cell->GetGain();
       // Now update the heap
-      // std::cout << "[DEBUG] Updating the gain bucket " << std::endl;
       // assert(gain_buckets[nbr_to_part]->GetStatus() == true);
       int nbr_index_in_heap = gain_buckets[nbr_to_part]->GetLocationOfVertex(v);
-      // std::cout << "[DEBUG] Location of vertex " << v << " is "
-      //            << nbr_index_in_heap << std::endl;
       gain_buckets[nbr_to_part]->ChangePriority(nbr_index_in_heap, new_gain);
     }  // If the vertex is a boundary vertex and is not in the gain bucket then
        // add it to the bucket
@@ -791,8 +751,6 @@ void KPMRefinement::KPMupdateNeighbors(
                                         *cur_path_cost,
                                         net_degs);
       // Add this new cell to the gain bucket
-      /*std::cout << "[DEBUG] Adding vertex " << v << " with gain "
-                << gain_cell.GetGain() << std::endl;*/
       gain_buckets[nbr_to_part]->InsertIntoPQ(gain_cell);
     }
     /*

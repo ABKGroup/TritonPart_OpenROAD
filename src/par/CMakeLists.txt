@@ -36,17 +36,12 @@
 include("openroad")
 
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_MODULE_PATH               "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-
 set(CMAKE_CXX_FLAGS                 "${CMAKE_CXX_FLAGS} -DIL_STD -m64 -Wall -fPIC")
 set(CMAKE_INCLUDE_SYSTEM_FLAG_CXX   "-isystem ")
 set(LINKER_OPTIONS                  "-Wl,--export-dynamic")
 
-find_package(Cplex)
 find_package(Threads REQUIRED)
 find_package(ortools REQUIRED)
-include_directories(SYSTEM ${CPLEX_INCLUDE_DIRS})
-
 
 swig_lib(NAME      par
          NAMESPACE par
@@ -85,8 +80,6 @@ target_link_libraries(par
     dbSta
   PRIVATE
     ortools::ortools
-    ${CPLEX_LIBRARIES}
-    ${CMAKE_THREAD_LIBS_INIT}
     dl
 )
 

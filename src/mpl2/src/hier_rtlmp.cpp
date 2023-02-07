@@ -217,18 +217,26 @@ void HierRTLMP::hierRTLMacroPlacer()
   //
   block_ = db_->getChip()->getBlock();
   dbu_ = db_->getTech()->getDbUnitsPerMicron();
-  pitch_x_ = dbuToMicron(
-      static_cast<float>(
-          db_->getTech()->findRoutingLayer(snap_layer_)->getPitchX()),
-      dbu_);
-  pitch_y_ = dbuToMicron(
-      static_cast<float>(
-          db_->getTech()->findRoutingLayer(snap_layer_)->getPitchY()),
-      dbu_);
+  // report the parameters
+  logger_->report("area_weight_ = {}", area_weight_);
+  logger_->report("outline_weight_ = {}", outline_weight_);
+  logger_->report("wirelength_weight_ = {}", wirelength_weight_);
+  logger_->report("guidance_weight_ = {}", guidance_weight_);
+  logger_->report("fence_weight_ = {}", fence_weight_);
+  logger_->report("boundary_weight_ = {}", boundary_weight_);
+  logger_->report("notch_weight_ = {}", notch_weight_);
+  logger_->report("macro_blockage_weight_ = {}", macro_blockage_weight_);
+  logger_->report("halo_width_ = {}", halo_width_);
 
-  std::cout << "golden pitch_x = " << micronToDbu(pitch_x_, dbu_)
-            << "golden pitch_y = " << micronToDbu(pitch_y_, dbu_)
-            << std::endl;
+  // calculate the pitch_x_ and pitch_y automatically based on macro pins
+  //pitch_x_ = dbuToMicron(
+  //    static_cast<float>(
+  //        db_->getTech()->findRoutingLayer(snap_layer_)->getPitchX()),
+  //    dbu_);
+  //pitch_y_ = dbuToMicron(
+  //    static_cast<float>(
+  //        db_->getTech()->findRoutingLayer(snap_layer_)->getPitchY()),
+  //    dbu_);
             
   //
   // Get the floorplan information
@@ -287,7 +295,23 @@ void HierRTLMP::hierRTLMacroPlacer()
                 metrics_->getStdCellArea() + metrics_->getMacroArea(),
                 util,
                 core_util);
-
+  // calculate the pitch_x and pitch_y based on the pins of macros
+  for (auto& macro : hard_macro_map_) {
+    odb::dbMaster* master = macro.first->getMaster();
+    for (odb::dbMTerm* mterm : master->getMTerms()) {
+      if (mterm->getSigType() == odb::dbSigType::SIGNAL) {
+        for (odb::dbMPin* mpin : mterm->getMPins()) {
+          for (odb::dbBox* box : mpin->getGeometry()) {
+            odb::dbTechLayer* layer = box->getTechLayer();
+            pitch_x_ = dbuToMicron(static_cast<float>(layer->getPitchX()), dbu_);
+            pitch_y_ = dbuToMicron(static_cast<float>(layer->getPitchY()), dbu_);
+          }
+        }
+      }
+    }
+    break; // we just need to calculate pitch_x and pitch_y once    
+  }
+  
   //
   // Set defaults for min/max number of instances and macros if not set by user.
   //
@@ -491,17 +515,6 @@ Metrics* HierRTLMP::computeMetrics(odb::dbModule* module)
       // add hard macro to corresponding map
       HardMacro* macro = new HardMacro(inst, dbu_, halo_width_);
       hard_macro_map_[inst] = macro;
-      // print the basic information of the pins
-      for (odb::dbMTerm* mterm : master->getMTerms()) {
-        if (mterm->getSigType() == odb::dbSigType::SIGNAL) {
-          for (odb::dbMPin* mpin : mterm->getMPins()) {
-            for (odb::dbBox* box : mpin->getGeometry()) {
-              odb::dbTechLayer* layer = box->getTechLayer();
-              std::cout << "pitch_x = " << layer->getPitchX() << "  pitch_y = " << layer->getPitchY() << std::endl;
-            }
-          }
-       }
-      }
     } else {
       num_std_cell += 1;
       std_cell_area += inst_area;

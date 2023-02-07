@@ -353,10 +353,6 @@ void TPmultilevelPartitioner::MultilevelPartTwoWay(
   TP_coarse_graphs hierarchy = coarsener_->LazyFirstChoice(hgraph);
   HGraph coarsest_hgraph = hierarchy.back();
   hierarchy.pop_back();
-  /*auto map_orig = MapClusters(hierarchy);
-  std::cout << "[debug] orig map size " << map_orig.size() << std::endl;
-
-  exit(EXIT_SUCCESS);*/
   two_way_refiner_->SetHeSizeSkip(500);
   auto init_partitions
       = InitialPartTwoWay(coarsest_hgraph, max_vertex_balance, solution);
@@ -483,7 +479,7 @@ TPmultilevelPartitioner::InitialPartKWay(HGraph coarsest_hgraph,
   std::mt19937 gen;
   gen.seed(seed_);
   std::uniform_real_distribution<> dist(0.0, 1.0);
-  coarsest_hgraph->WriteHypergraph("coarsest");
+  // coarsest_hgraph->WriteHypergraph("coarsest");
   // set the solution set
   matrix<int> solution_set;
   std::vector<int> cutsize_vec;
@@ -510,12 +506,10 @@ TPmultilevelPartitioner::InitialPartKWay(HGraph coarsest_hgraph,
   // ILP initial partitioning
   std::vector<int> ilp_part = solution_set[best_solution_id];
   if (coarsest_hgraph->num_hyperedges_ > 0) {
-    std::cout << "INIT_DIRECT_WARM_ILP" << std::endl;
     partitioner_->SetPartitionerChoice(INIT_DIRECT_ILP);
     //partitioner_->SetPartitionerChoice(INIT_DIRECT_WARM_ILP);
     partitioner_->Partition(coarsest_hgraph, max_vertex_balance, ilp_part);
   } else {
-    std::cout << "INIT_DIRECT_ILP" << std::endl;
     partitioner_->SetPartitionerChoice(INIT_DIRECT_ILP);
     partitioner_->Partition(coarsest_hgraph, max_vertex_balance, ilp_part);
   }
@@ -644,7 +638,6 @@ void TPmultilevelPartitioner::MultilevelPartKWay(
     TP_partition& solution,
     bool VCycle)
 {
-  logger_->report("MultilevelPartKWay starts !!!");
   coarsener_->SetVertexOrderChoice(RANDOM);
   auto community = coarsener_->PathBasedCommunity(hgraph);
   hgraph->community_attr_ = community;

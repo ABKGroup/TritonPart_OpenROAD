@@ -38,12 +38,19 @@
 
 #include "TPHypergraph.h"
 #include "Utilities.h"
-#include "ilcplex/cplex.h"
-#include "ilcplex/ilocplex.h"
+
+// edited by Zhiang (20230206)
+// removed CPLEX
+//#include "ilcplex/cplex.h"
+//#include "ilcplex/ilocplex.h"
 //#include <ortools/base/init_google.h>
 #include <ortools/base/logging.h>
 #include <ortools/linear_solver/linear_solver.h>
 #include <ortools/linear_solver/linear_solver.pb.h>
+#include "ortools/base/logging.h"
+#include "ortools/sat/cp_model.h"
+#include "ortools/sat/cp_model.pb.h"
+#include "ortools/sat/cp_model_solver.h"
 
 #include "utl/Logger.h"
 
@@ -53,6 +60,14 @@ using operations_research::MPConstraint;
 using operations_research::MPObjective;
 using operations_research::MPSolver;
 using operations_research::MPVariable;
+using operations_research::sat::CpModelBuilder;
+using operations_research::sat::BoolVar;
+using operations_research::sat::LinearExpr;
+using operations_research::sat::CpSolverResponse;
+using operations_research::sat::Solve;
+using operations_research::sat::CpSolverStatus;
+using operations_research::sat::SolutionBooleanValue;
+
 
 matrix<int> TPrefiner::GetNetDegrees(const HGraph hgraph,
                                      TP_partition& solution)
@@ -577,10 +592,7 @@ void TPpriorityQueue::InsertIntoPQ(std::shared_ptr<VertexGain> vertex)
 {
   total_elements_++;
   vertices_.push_back(vertex);
-  // std::cout << "[DEBUG] Vertex " << vertex.GetVertex() << " with total ele "
-  // << total_elements_ << std::endl;
   vertices_map_[vertex->GetVertex()] = total_elements_ - 1;
-  // std::cout << "[DEBUG] Starting heapify up " << std::endl;
   HeapifyUp(total_elements_ - 1);
 }
 
@@ -599,9 +611,6 @@ std::shared_ptr<VertexGain> TPpriorityQueue::ExtractMax()
 
 void TPpriorityQueue::ChangePriority(int index, float priority)
 {
-  if (index > total_elements_ || index == -1) {
-    // std::cout << "[DEBUG] Index asked " << index << std::endl;
-  }
   float old_priority = vertices_[index]->GetGain();
   vertices_[index]->SetGain(priority);
   if (priority > old_priority) {
@@ -645,7 +654,9 @@ void TPtwoWayFM::Refine(const HGraph hgraph,
     }
     InitPaths(hgraph, paths_cost, solution);
     gain_in_pass = Pass(hgraph, max_block_balance, solution, paths_cost);
-    hgraph->hyperedge_weights_ = hgraph->nonscaled_hyperedge_weights_;
+    if (hgraph->num_timing_paths_ > 0) {
+      hgraph->hyperedge_weights_ = hgraph->nonscaled_hyperedge_weights_;
+    }
   }
 }
 
@@ -764,8 +775,6 @@ std::shared_ptr<VertexGain> TPtwoWayFM::FindMovableVertex(
   int redo_moves = std::min(10, buckets[flip_corking_part]->GetTotalElements());
   for (int i = 0; i < redo_moves; ++i) {
     auto ele = buckets[flip_corking_part]->GetHeapVertex(i);
-    /*std::cout << "[debug] redoing move " << i << " with vertex "
-              << ele->GetVertex() << std::endl;*/
     if (CheckLegality(hgraph,
                       flip_corking_part,
                       ele,
@@ -810,10 +819,7 @@ std::shared_ptr<VertexGain> TPtwoWayFM::PickMoveTwoWay(
 {
   int corking_part = -1;
   std::shared_ptr<VertexGain> dummy_cell(new VertexGain);
-  /*std::cout << "[debug] elements in PQ " << buckets[0]->GetTotalElements()
-            << " and " << buckets[1]->GetTotalElements() << std::endl;*/
   if (buckets[0]->GetStatus() == true && buckets[1]->GetStatus() == false) {
-    // std::cout << "[debug] flag 0" << std::endl;
     auto ele = buckets[0]->GetMax();
     float gain = ele->GetGain();
     bool legality_of_move
@@ -827,7 +833,6 @@ std::shared_ptr<VertexGain> TPtwoWayFM::PickMoveTwoWay(
     }
   } else if (buckets[1]->GetStatus() == true
              && buckets[0]->GetStatus() == false) {
-    // std::cout << "[debug] flag 1" << std::endl;
     auto ele = buckets[1]->GetMax();
     float gain = ele->GetGain();
     bool legality_of_move
@@ -1080,14 +1085,11 @@ float TPtwoWayFM::Pass(const HGraph hgraph,
   auto partition_pair = std::make_pair(0, 1);
   std::vector<int> boundary_vertices
       = FindBoundaryVertices(hgraph, net_degs, partition_pair);
-  /*std::vector<int> boundary_vertices(hgraph->num_vertices_);
-  std::iota(boundary_vertices.begin(), boundary_vertices.end(), 0);*/
   InitGainBucketsTwoWay(
       hgraph, solution, net_degs, boundary_vertices, paths_cost, buckets);
   // Moves begin
   std::vector<VertexGain> moves_trace;
   float cutsize = CutEvaluator(hgraph, solution).first;
-  // std::cout << "[debug] cutsize before refine " << cutsize << std::endl;
   float min_cut = cutsize;
   float total_delta_gain = 0.0;
   int move_limit = 2;
@@ -2043,11 +2045,9 @@ void TPilpRefine::OrderVertexSet(HGraph hgraph,
                                  const matrix<float>& max_block_balance)
 {
   std::vector<float> gain_vertices(hgraph->num_vertices_, 0.0);
-  // std::cout << "[debug] boundary size " << vertices.size() << std::endl;
   for (int i = 0; i < vertices.size(); ++i) {
     gain_vertices[i] = CalculateGain(vertices[i], solution, hgraph, net_degs);
   }
-  // std::cout << "[debug] gains have been calculated " << std::endl;
   auto gain_comparison = [&](int x, int y) {
     if (gain_vertices[x] > gain_vertices[y]) {
       const int from = solution[x];
@@ -2100,7 +2100,6 @@ std::shared_ptr<TPilpGraph> TPilpRefine::ContractHypergraph(
 {
   int total_ilp_vtxs
       = *std::max_element(cluster_map_.begin(), cluster_map_.end()) + 1;
-  // std::cout << "[debug] total ilp vtxs " << total_ilp_vtxs << std::endl;
   matrix<float> vtx_wts_crs(
       total_ilp_vtxs, std::vector<float>(hgraph->vertex_dimensions_, 0.0));
   std::vector<int> fixed_vtxs_crs(total_ilp_vtxs, -1);
@@ -2116,7 +2115,6 @@ std::shared_ptr<TPilpGraph> TPilpRefine::ContractHypergraph(
       fixed_vtxs_crs[cid] = -1;
     }
   }
-  // std::cout << "[debug] here " << std::endl;
   matrix<int> hes_crs;
   matrix<float> hes_wts_crs;
   std::map<long long int, int> hash_map;
@@ -2260,6 +2258,98 @@ void TPilpRefine::SolveIlpInstanceOR(std::shared_ptr<TPilpGraph> hgraph,
   }
 }
 
+
+// Updated by Zhiang: 20230206
+// We replace CPLEX with the CP-SAT in Google OR-Tools
+// We can add hint in CP-SAT to replace warm-start in CPLEX
+void TPilpRefine::SolveIlpInstance(std::shared_ptr<TPilpGraph> hgraph,
+                                   TP_partition& refined_partition,
+                                   const matrix<float>& max_block_balance)
+{
+  // Build CP Model
+  CpModelBuilder cp_model;
+  // Variables
+  // x[i][j] is an array of Boolean variables
+  // x[i][j] is true if vertex i to partition j
+  std::vector<std::vector<BoolVar> > var_x(num_parts_, std::vector<BoolVar>(hgraph->GetNumVertices()));
+  std::vector<std::vector<BoolVar> > var_y(num_parts_, std::vector<BoolVar>(hgraph->GetNumHyperedges()));
+  for (auto i = 0; i < num_parts_; i++) {
+    // initialize var_x
+    for (auto j = 0; j < hgraph->GetNumVertices(); j++)
+      var_x[i][j] = cp_model.NewBoolVar();
+    // initialize var_y
+    for (auto j = 0; j < hgraph->GetNumHyperedges(); j++)
+      var_y[i][j] = cp_model.NewBoolVar();
+  }
+  // define constraints
+  // balance constraint
+  // check each dimension
+  for (int i = 0; i < hgraph->GetVertexDimensions(); ++i) {
+    // allowed balance for each dimension
+    for (int j = 0; j < num_parts_; ++j) {
+      LinearExpr balance_expr;
+      for (int k = 0; k < hgraph->GetNumVertices(); ++k) {
+        balance_expr += hgraph->GetVertexWeight(k)[i] * var_x[j][k];
+      }  // finish traversing vertices
+      cp_model.AddLessOrEqual(balance_expr, max_block_balance[j][i]);
+    }  // finish traversing blocks
+  }    // finish dimension check
+  // each vertex can only belong to one part between part_x and part_y
+  for (int i = 0; i < hgraph->GetNumVertices(); ++i) {
+    if (hgraph->CheckFixedStatus(i) == true) {
+      for (auto j = 0; j < num_parts_; j++) {
+        cp_model.FixVariable(var_x[j][i], j == hgraph->GetFixedPart(i));
+      } // fixed vertices
+    } else {
+      std::vector<BoolVar> possible_partitions;
+      for (auto j = 0; j < num_parts_; j++) {
+        possible_partitions.push_back(var_x[j][i]);
+      }
+      cp_model.AddExactlyOne(possible_partitions);
+    }
+  }
+  // Hyperedge constraint
+  for (int e = 0; e < hgraph->GetNumHyperedges(); ++e) {
+    std::pair<int, int> indices = hgraph->GetEdgeIndices(e);
+    const int first_valid_entry = indices.first;
+    const int first_invalid_entry = indices.second;
+    for (int j = first_valid_entry; j < first_invalid_entry; ++j) {
+      const int vertex_id = hgraph->eind_[j];
+      for (int k = 0; k < num_parts_; ++k) {
+        cp_model.AddLessOrEqual(var_y[k][e], var_x[k][vertex_id]);
+      }
+    }
+  }
+  // Objective (Maximize objective function -> Minimize cutsize)
+  LinearExpr obj_expr;
+  for (int i = 0; i < hgraph->GetNumHyperedges(); ++i) {
+    auto ewt = hgraph->GetHyperedgeWeight(i);
+    const float cost_value = std::inner_product(
+         ewt.begin(), ewt.end(), e_wt_factors_.begin(), 0.0);
+    for (int j = 0; j < num_parts_; ++j) {
+      obj_expr += var_y[j][i] * cost_value;
+    } 
+  }
+  cp_model.Maximize(obj_expr);
+  // solve
+  const CpSolverResponse response = Solve(cp_model.Build());
+  // Print solution.
+  if (response.status() == CpSolverStatus::INFEASIBLE) {
+    logger_->report("No feasible solution found with ILP --> Running K-way FM instead");
+  } else {
+    for (auto i = 0; i < hgraph->GetNumVertices(); i++) {
+      for (auto j = 0; j < num_parts_; j++) {
+        if (SolutionBooleanValue(response, var_x[j][i])) {
+          refined_partition[i] = j;
+        }
+      }
+    }
+  }
+  // close the model
+}
+
+
+/*
 void TPilpRefine::SolveIlpInstance(std::shared_ptr<TPilpGraph> hgraph,
                                    TP_partition& refined_partition,
                                    const matrix<float>& max_block_balance)
@@ -2361,14 +2451,15 @@ void TPilpRefine::SolveIlpInstance(std::shared_ptr<TPilpGraph> hgraph,
     for (auto& value : refined_partition)
       value = (value == -1) ? 0 : value;
   } else {
-    /* for Ilp infeasibility debug
-    mycplex.exportModel("model.mps");
-    DebugIlpInstance("model.mps"); */
+    // for Ilp infeasibility debug
+    //mycplex.exportModel("model.mps");
+    // DebugIlpInstance("model.mps"); 
   }
   // closing the model
   mycplex.clear();
   myenv.end();
 }
+*/
 
 inline void TPilpRefine::Remap(std::vector<int>& partition,
                                std::vector<int>& refined_partition)
@@ -2404,7 +2495,7 @@ void TPilpRefine::Refine(const HGraph hgraph,
   if (*std::min_element(partition.begin(), partition.end()) > -1) {
     Remap(solution, partition);
   } else {
-    std::cout << "[ilp refinement failed]" << std::endl;
+    logger_->report("[ilp refinement failed]");
   }
 }
 
