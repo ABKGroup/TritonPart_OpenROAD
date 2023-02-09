@@ -120,7 +120,7 @@ def RunPartitioner(partitioner, exe, hypergraph_file, Nparts, UBfactor, seed):
 #########################################################################
 ### Please specify user parameters here !
 print("Running Regression Sweep!")
-tritonpart_exe = "/home/fetzfs_projects/TritonPart/zhiang/TritonPart_OpenROAD/build/src/openroad"
+tritonpart_exe = "/home/fetzfs_projects/HierRTLMP/TritonPart_OpenROAD/src/par/tritonpart_test/openroad"
 khmetis_exe = "/home/bodhi91/sandbox/HMETIS/hmetis-1.5-linux/khmetis"
 hmetis_exe = "/home/bodhi91/sandbox/HMETIS/hmetis-1.5-linux/hmetis"
 # Setup benchmark directory
@@ -136,7 +136,7 @@ design_list = ["bitcoin_miner",
 # Setup sweep parameters
 UBfactor_list = [2, 5]
 Nparts_list = [2, 5]
-Nruns = 2
+Nruns = 50
 seed_list = list(range(Nruns))
 summary_report = "tp_summary.csv"
 

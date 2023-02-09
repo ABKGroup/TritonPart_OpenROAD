@@ -37,6 +37,7 @@
 #include <fstream>
 #include <queue>
 #include <thread>
+#include <algorithm>
 
 // Partitioner note : currently we are still using MLPart to partition large
 // flat clusters Later this will be replaced by our TritonPart
@@ -135,6 +136,8 @@ void HierRTLMP::setGlobalFence(float fence_lx,
 void HierRTLMP::setHaloWidth(float halo_width)
 {
   halo_width_ = halo_width;
+  notch_v_th_ = halo_width_ * 10;
+  notch_h_th_ = halo_width_ * 10;
 }
 
 // Options related to clustering
@@ -227,17 +230,6 @@ void HierRTLMP::hierRTLMacroPlacer()
   logger_->report("notch_weight_ = {}", notch_weight_);
   logger_->report("macro_blockage_weight_ = {}", macro_blockage_weight_);
   logger_->report("halo_width_ = {}", halo_width_);
-
-  // calculate the pitch_x_ and pitch_y automatically based on macro pins
-  //pitch_x_ = dbuToMicron(
-  //    static_cast<float>(
-  //        db_->getTech()->findRoutingLayer(snap_layer_)->getPitchX()),
-  //    dbu_);
-  //pitch_y_ = dbuToMicron(
-  //    static_cast<float>(
-  //        db_->getTech()->findRoutingLayer(snap_layer_)->getPitchY()),
-  //    dbu_);
-            
   //
   // Get the floorplan information
   //
@@ -454,7 +446,12 @@ void HierRTLMP::hierRTLMacroPlacer()
   // (Preorder DFS)
   multiLevelMacroPlacement(root_cluster_);
   logger_->report("Finished Multi-level Macro Placement.\n");
-
+  logger_->report("Align macros globally");
+  alignHardMacroGlobal();
+  // update the positions of macros
+  for (auto& [inst, hard_macro] : hard_macro_map_) {
+    hard_macro->updateDb(pitch_x_, pitch_y_);
+  }
   // Clear the memory to avoid memory leakage
   // release all the pointers
   // metrics map
@@ -841,10 +838,10 @@ void HierRTLMP::multiLevelCluster(Cluster* parent)
   min_num_inst_ = min_num_inst_base_ / std::pow(coarsening_ratio_, level_ - 1);
   // We define the tolerance to improve the robustness of our hierarchical
   // clustering
-  max_num_inst_ = max_num_inst_ * (1 + tolerance_);
-  min_num_inst_ = min_num_inst_ * (1 - tolerance_);
-  max_num_macro_ = max_num_macro_ * (1 + tolerance_);
-  min_num_macro_ = min_num_macro_ * (1 - tolerance_);
+  max_num_inst_ = std::max(max_num_inst_ * (1 + tolerance_), 1.0f);
+  min_num_inst_ = std::max(min_num_inst_ * (1 - tolerance_), 1.0f);
+  max_num_macro_ = std::max(max_num_macro_ * (1 + tolerance_), 1.0f);
+  min_num_macro_ = std::max(min_num_macro_ * (1 - tolerance_), 1.0f);
 
   if (force_split || (parent->getNumStdCell() > max_num_inst_)) {
     breakCluster(parent);   // Break the parent cluster into children clusters
@@ -1065,8 +1062,6 @@ void HierRTLMP::breakCluster(Cluster* parent)
       }
     }
   }
-
-  //
   // Merge small clusters
   std::vector<Cluster*> candidate_clusters;
   for (auto& cluster : parent->getChildren()) {
@@ -1224,7 +1219,6 @@ void HierRTLMP::mergeClusters(std::vector<Cluster*>& candidate_clusters)
         candidate_clusters.push_back(cluster);
       }
     }
-
     // If no more clusters have been merged, exit the merging loop
     if (num_candidate_clusters == new_candidate_clusters.size()) {
       break;
@@ -2209,13 +2203,14 @@ void HierRTLMP::printPhysicalHierarchyTree(Cluster* parent, int level)
   }
   line += fmt::format(
       "{}  ({})  num_macro :  {}   num_std_cell :  {}"
-      "  macro_area :  {}  std_cell_area : {}",
+      "  macro_area :  {}  std_cell_area : {}  num_children : {}",
       parent->getName(),
       parent->getId(),
       parent->getNumMacro(),
       parent->getNumStdCell(),
       parent->getMacroArea(),
-      parent->getStdCellArea());
+      parent->getStdCellArea(),
+      parent->getChildren().size());
   logger_->report("{}\n", line);
   int tot_num_macro_in_children = 0;
   for (auto& cluster : parent->getChildren()) {
@@ -3198,7 +3193,7 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
     }
   }
   file_name = report_directory_ + "/" + file_name;
-  file.open(file_name + "net.txt");
+  file.open(file_name + ".net.txt");
   for (auto& net : nets) {
     file << macros[net.terminals.first].getName() << "   "
          << macros[net.terminals.second].getName() << "   " << net.weight
@@ -4094,11 +4089,399 @@ void HierRTLMP::hardMacroClusterMacroPlacement(Cluster* cluster)
     num_updated_macros_++;
     hard_macro->setX(hard_macro->getX() + lx);
     hard_macro->setY(hard_macro->getY() + ly);
-    hard_macro->updateDb(pitch_x_, pitch_y_);
+    //hard_macro->updateDb(pitch_x_, pitch_y_);
   }
   // clean SA to avoid memory leakage
   sa_containers.clear();
   setInstProperty(cluster);
+}
+
+
+// Align all the macros globally to reduce the waste of standard cell space
+void HierRTLMP::alignHardMacroGlobal() {
+  std::vector<HardMacro*> hard_macros;
+  int boundary_v_th = std::numeric_limits<int>::max();
+  int boundary_h_th = std::numeric_limits<int>::max();
+  for (auto& macro_inst : hard_macro_map_) {
+    hard_macros.push_back(macro_inst.second);
+    boundary_h_th = std::min(boundary_h_th, macro_inst.second->getRealWidthDBU());
+    boundary_v_th = std::min(boundary_v_th, macro_inst.second->getRealHeightDBU());
+  }
+  const int notch_v_th = std::max(micronToDbu(notch_v_th_, dbu_), boundary_v_th);
+  const int notch_h_th = std::max(micronToDbu(notch_h_th_, dbu_), boundary_h_th);
+  logger_->report("boundary_h_th : {}, boundary_v_th : {}", 
+                   dbuToMicron(boundary_h_th, dbu_),
+                   dbuToMicron(boundary_v_th, dbu_));
+  logger_->report("notch_h_th : {}, notch_v_th : {}", 
+                   dbuToMicron(notch_h_th, dbu_),
+                   dbuToMicron(notch_v_th, dbu_));
+  // get the floorplan information
+  const odb::Rect core_box = block_->getCoreArea();
+  const int core_lx = core_box.xMin();
+  const int core_ly = core_box.yMin();
+  const int core_ux = core_box.xMax();
+  const int core_uy = core_box.yMax();
+  // define lamda function for check if the move is allowed
+  auto isValidMove = [&](size_t macro_id) {
+    // check if the macro can fit into the core area
+    const int macro_lx = hard_macros[macro_id]->getRealXDBU();
+    const int macro_ly = hard_macros[macro_id]->getRealYDBU();
+    const int macro_ux = hard_macros[macro_id]->getRealUXDBU();
+    const int macro_uy = hard_macros[macro_id]->getRealUYDBU();
+    if (macro_lx < core_lx || macro_ly < core_ly ||
+        macro_ux > core_ux || macro_uy > core_uy)
+      return false;    
+    // check if there is some overlap with other macros
+    for (auto i = 0; i < hard_macros.size(); i++) {
+      if (i == macro_id)
+        continue;
+      const int lx = hard_macros[i]->getRealXDBU();
+      const int ly = hard_macros[i]->getRealYDBU();
+      const int ux = hard_macros[i]->getRealUXDBU();
+      const int uy = hard_macros[i]->getRealUYDBU();
+      if (macro_lx >= ux  || macro_ly >= uy ||
+          macro_ux <= lx  || macro_uy <= ly)   
+        continue;
+      else
+        return false; // there is some overlap with others   
+    }
+    return true;  // this move is valid    
+  };
+  // define lamda function for move a hard macro horizontally and vertically
+  auto moveHor = [&](size_t macro_id, int x) {
+    const int x_old = hard_macros[macro_id]->getXDBU();
+    hard_macros[macro_id]->setXDBU(x);
+    logger_->report("Trying to remove macro ...");
+    const int lx = hard_macros[macro_id]->getXDBU();
+    const int ly = hard_macros[macro_id]->getYDBU();
+    const int ux = hard_macros[macro_id]->getUXDBU();
+    const int uy = hard_macros[macro_id]->getUYDBU();
+    logger_->report("try macro :  {},  lx = {}, ly = {}, ux = {}, uy = {}",
+                     hard_macros[macro_id]->getName(),
+                     dbuToMicron(lx, dbu_),
+                     dbuToMicron(ly, dbu_),
+                     dbuToMicron(ux, dbu_),
+                     dbuToMicron(uy, dbu_));
+    if (isValidMove(macro_id) == false) {
+      hard_macros[macro_id]->setXDBU(x_old);
+      logger_->report("Failed");
+      return false;
+    }
+    logger_->report("Done");
+    return true;
+  };
+  
+  auto moveVer = [&](size_t macro_id, int y) {
+    const int y_old = hard_macros[macro_id]->getYDBU();
+    hard_macros[macro_id]->setYDBU(y);
+    if (isValidMove(macro_id) == false) {
+      hard_macros[macro_id]->setYDBU(y_old);
+      return false;
+    }
+    return true;
+  };
+  
+  // Align macros with the corresponding boundaries
+  // follow the order of left, top, right, bottom
+  // left boundary
+  for (auto j = 0; j < hard_macros.size(); j++) {
+    if (std::abs(hard_macros[j]->getXDBU() - core_lx) < boundary_h_th) {
+      moveHor(j, core_lx);
+    }
+  } 
+  // top boundary
+  for (auto j = 0; j < hard_macros.size(); j++) {
+    if (std::abs(hard_macros[j]->getUYDBU() - core_uy) < boundary_v_th) {
+      moveVer(j, core_uy - hard_macros[j]->getHeightDBU());
+    }
+  } 
+  // right boundary
+  for (auto j = 0; j < hard_macros.size(); j++) {
+    if (std::abs(hard_macros[j]->getUXDBU() - core_ux) < boundary_h_th) {
+      moveHor(j, core_ux - hard_macros[j]->getWidthDBU());
+    }
+  } 
+  // bottom boundary
+  for (auto j = 0; j < hard_macros.size(); j++) {
+    if (std::abs(hard_macros[j]->getUYDBU() - core_ly) < boundary_v_th) {
+      moveVer(j, core_ly);
+    }
+  }
+  
+  // Comparator function to sort pairs according to second value
+  auto LessOrEqualX = [&](std::pair<size_t, std::pair<int, int> >& a,
+                          std::pair<size_t, std::pair<int, int> >& b)
+  {
+    if (a.second.first < b.second.first)
+      return true;
+    else if (a.second.first == b.second.first)
+      return a.second.second < b.second.second;
+    else
+      return false;
+  };
+  
+  auto LargeOrEqualX = [&](std::pair<size_t, std::pair<int, int> >& a, 
+                          std::pair<size_t, std::pair<int, int> >& b)
+  {
+    if (a.second.first > b.second.first)
+      return true;
+    else if (a.second.first == b.second.first)
+      return a.second.second > b.second.second;
+    else
+      return false;
+  };
+
+  auto LessOrEqualY = [&](std::pair<size_t, std::pair<int, int> >& a,
+                          std::pair<size_t, std::pair<int, int> >& b)
+  {
+    if (a.second.second < b.second.second)
+      return true;
+    else if (a.second.second == b.second.second)
+      return a.second.first > b.second.first;
+    else
+      return false;
+  };
+
+
+  auto LargeOrEqualY = [&](std::pair<size_t, std::pair<int, int> >& a,
+                           std::pair<size_t, std::pair<int, int> >& b)
+  {
+    if (a.second.second > b.second.second)
+      return true;
+    else if (a.second.second == b.second.second)
+      return a.second.first < b.second.first;
+    else
+      return false;
+  };
+
+
+  std::queue<size_t>  macro_queue;
+  std::vector<size_t> macro_list;  
+  std::vector<bool>   flags(hard_macros.size(), false);
+  // align to the left
+  std::vector<std::pair<size_t, std::pair<int, int> > > macro_lx_map;
+  for (size_t j = 0; j < hard_macros.size(); j++)
+    macro_lx_map.push_back(std::pair<size_t, std::pair<int, int> >(j, 
+                           std::pair<int, int>(hard_macros[j]->getXDBU(),
+                                               hard_macros[j]->getYDBU())));
+  std::sort(macro_lx_map.begin(), macro_lx_map.end(), LessOrEqualX);
+  for (auto& pair : macro_lx_map) {
+    if (pair.second.first <= core_lx + boundary_h_th) {
+      flags[pair.first] = true;  // fix this
+      macro_queue.push(pair.first); // use this as an anchor
+    } else if(hard_macros[pair.first]->getUXDBU() >= core_ux - boundary_h_th) {
+      flags[pair.first] = true;  // fix this
+    } else {
+      macro_list.push_back(pair.first);
+    } 
+  }
+  while (!macro_queue.empty()) {
+    const size_t macro_id = macro_queue.front();
+    macro_queue.pop();
+    const int lx = hard_macros[macro_id]->getXDBU();
+    const int ly = hard_macros[macro_id]->getYDBU();
+    const int ux = hard_macros[macro_id]->getUXDBU();
+    const int uy = hard_macros[macro_id]->getUYDBU();
+    logger_->report("seed macro :  {},  lx = {}, ly = {}, ux = {}, uy = {}",
+                     hard_macros[macro_id]->getName(),
+                     dbuToMicron(lx, dbu_),
+                     dbuToMicron(ly, dbu_),
+                     dbuToMicron(ux, dbu_),
+                     dbuToMicron(uy, dbu_));
+    for (auto j : macro_list) {
+      if (flags[j] == true)
+        continue;
+      const int lx_b = hard_macros[j]->getXDBU();
+      const int ly_b = hard_macros[j]->getYDBU();
+      const int ux_b = hard_macros[j]->getUXDBU();
+      const int uy_b = hard_macros[j]->getUYDBU();
+      logger_->report("Candidate macro : {}, lx_b = {}, ly_b = {}, ux_b = {}, uy_b = {}",
+                       hard_macros[j]->getName(), 
+                       dbuToMicron(lx_b, dbu_), 
+                       dbuToMicron(ly_b, dbu_), 
+                       dbuToMicron(ux_b, dbu_), 
+                       dbuToMicron(uy_b, dbu_));
+      // check if adjacent
+      const bool y_flag = std::abs(ly - ly_b) < notch_v_th ||
+                          std::abs(ly - uy_b) < notch_v_th ||
+                          std::abs(uy - ly_b) < notch_v_th ||
+                          std::abs(uy - uy_b) < notch_v_th;
+      logger_->report("y_flag = {}", y_flag);
+      if (y_flag == false)
+        continue;
+      // try to move horizontally      
+      if (lx_b >= lx && lx_b <= lx + notch_h_th && lx_b < ux)
+        flags[j] = moveHor(j, lx);
+      else if (lx_b >= ux && lx_b <= ux + notch_h_th)
+        flags[j] = moveHor(j, ux);
+      // check if moved correctly
+      if (flags[j] == true) {
+        macro_queue.push(j); 
+        logger_->report("move macro :  {},  lx = {}, ly = {}, ux = {}, uy = {}",
+                     hard_macros[j]->getName(),
+                     dbuToMicron(lx_b, dbu_),
+                     dbuToMicron(ly_b, dbu_),
+                     dbuToMicron(ux_b, dbu_),
+                     dbuToMicron(uy_b, dbu_));
+      }     
+    }
+  }
+
+  // align to the top
+  macro_list.clear();
+  std::fill(flags.begin(), flags.end(), false);
+  std::vector<std::pair<size_t, std::pair<int, int> > > macro_uy_map;
+  for (size_t j = 0; j < hard_macros.size(); j++)
+    macro_uy_map.push_back(std::pair<size_t, std::pair<int, int> >(j,
+                           std::pair<int, int>(hard_macros[j]->getUXDBU(),
+                                               hard_macros[j]->getUYDBU())));
+  std::sort(macro_uy_map.begin(), macro_uy_map.end(), LargeOrEqualY);
+  for (auto& pair : macro_uy_map) {
+    if (hard_macros[pair.first]->getYDBU() <= core_ly + boundary_v_th) {
+      flags[pair.first] = true;  // fix this
+    } else if(hard_macros[pair.first]->getUYDBU() >= core_uy - boundary_v_th) {
+      flags[pair.first] = true;  // fix this
+      macro_queue.push(pair.first); // use this as an anchor
+    } else {
+      macro_list.push_back(pair.first);
+    } 
+  }
+  while (!macro_queue.empty()) {
+    const size_t macro_id = macro_queue.front();
+    macro_queue.pop();
+    const int lx = hard_macros[macro_id]->getXDBU();
+    const int ly = hard_macros[macro_id]->getYDBU();
+    const int ux = hard_macros[macro_id]->getUXDBU();
+    const int uy = hard_macros[macro_id]->getUYDBU();
+    for (auto j : macro_list) {
+      if (flags[j] == true)
+        continue;
+      const int lx_b = hard_macros[j]->getXDBU();
+      const int ly_b = hard_macros[j]->getYDBU();
+      const int ux_b = hard_macros[j]->getUXDBU();
+      const int uy_b = hard_macros[j]->getUYDBU();
+      // check if adjacent
+      const bool x_flag = std::abs(lx - lx_b) < notch_h_th ||
+                          std::abs(lx - ux_b) < notch_h_th ||
+                          std::abs(ux - lx_b) < notch_h_th ||
+                          std::abs(ux - ux_b) < notch_h_th;
+      if (x_flag == false)
+        continue;
+      // try to move vertically
+      if (uy_b < uy && uy_b >= uy - notch_v_th && uy_b > ly)
+        flags[j] = moveVer(j, uy - hard_macros[j]->getHeightDBU());
+      else if (uy_b <= ly && uy_b >= ly - notch_v_th)
+        flags[j] = moveVer(j, ly - hard_macros[j]->getHeightDBU());
+      // check if moved correctly
+      if (flags[j] == true) {
+        macro_queue.push(j); 
+      }     
+    }
+  }
+  
+  // align to the right
+  macro_list.clear();
+  std::fill(flags.begin(), flags.end(), false);
+  std::vector<std::pair<size_t, std::pair<int, int> > > macro_ux_map;
+  for (size_t j = 0; j < hard_macros.size(); j++)
+    macro_ux_map.push_back(std::pair<size_t, std::pair<int, int> >(j,
+                           std::pair<int, int>(hard_macros[j]->getUXDBU(),
+                                               hard_macros[j]->getUYDBU())));
+  std::sort(macro_ux_map.begin(), macro_ux_map.end(), LargeOrEqualX);
+  for (auto& pair : macro_ux_map) {
+    if (hard_macros[pair.first]->getXDBU() <= core_lx + boundary_h_th) {
+      flags[pair.first] = true;  // fix this
+    } else if(hard_macros[pair.first]->getUXDBU() >= core_ux - boundary_h_th) {
+      flags[pair.first] = true;  // fix this
+      macro_queue.push(pair.first); // use this as an anchor
+    } else {
+      macro_list.push_back(pair.first);
+    } 
+  }
+  while (!macro_queue.empty()) {
+    const size_t macro_id = macro_queue.front();
+    macro_queue.pop();
+    const int lx = hard_macros[macro_id]->getXDBU();
+    const int ly = hard_macros[macro_id]->getYDBU();
+    const int ux = hard_macros[macro_id]->getUXDBU();
+    const int uy = hard_macros[macro_id]->getUYDBU();
+    for (auto j : macro_list) {
+      if (flags[j] == true)
+        continue;
+      const int lx_b = hard_macros[j]->getXDBU();
+      const int ly_b = hard_macros[j]->getYDBU();
+      const int ux_b = hard_macros[j]->getUXDBU();
+      const int uy_b = hard_macros[j]->getUYDBU();
+      // check if adjacent
+      const bool y_flag = std::abs(ly - ly_b) < notch_v_th ||
+                          std::abs(ly - uy_b) < notch_v_th ||
+                          std::abs(uy - ly_b) < notch_v_th ||
+                          std::abs(uy - uy_b) < notch_v_th;
+      if (y_flag == false)
+        continue;
+      // try to move horizontally
+      if (ux_b < ux && ux_b >= ux - notch_h_th && ux_b > lx)
+        flags[j] = moveHor(j, ux - hard_macros[j]->getWidthDBU());
+      else if (ux_b <= lx && ux_b >= lx - notch_h_th)
+        flags[j] = moveHor(j, lx - hard_macros[j]->getWidthDBU());
+      // check if moved correctly
+      if (flags[j] == true) {
+        macro_queue.push(j); 
+      }     
+    }
+  }
+  // align to the bottom
+  macro_list.clear();
+  std::fill(flags.begin(), flags.end(), false);
+  std::vector<std::pair<size_t, std::pair<int, int> > > macro_ly_map;
+  for (size_t j = 0; j < hard_macros.size(); j++)
+    macro_ly_map.push_back(std::pair<size_t, std::pair<int, int> >(j, 
+                           std::pair<int, int>(hard_macros[j]->getXDBU(),
+                                               hard_macros[j]->getYDBU())));
+  std::sort(macro_ly_map.begin(), macro_ly_map.end(), LessOrEqualY);
+  for (auto& pair : macro_ly_map) {
+    if (hard_macros[pair.first]->getYDBU() <= core_ly + boundary_v_th) {
+      flags[pair.first] = true;  // fix this
+      macro_queue.push(pair.first); // use this as an anchor
+    } else if(hard_macros[pair.first]->getUYDBU() >= core_uy - boundary_v_th) {
+      flags[pair.first] = true;  // fix this
+    } else {
+      macro_list.push_back(pair.first);
+    } 
+  }
+  while (!macro_queue.empty()) {
+    const size_t macro_id = macro_queue.front();
+    macro_queue.pop();
+    const int lx = hard_macros[macro_id]->getXDBU();
+    const int ly = hard_macros[macro_id]->getYDBU();
+    const int ux = hard_macros[macro_id]->getUXDBU();
+    const int uy = hard_macros[macro_id]->getUYDBU();
+    for (auto j : macro_list) {
+      if (flags[j] == true)
+        continue;
+      const int lx_b = hard_macros[j]->getXDBU();
+      const int ly_b = hard_macros[j]->getYDBU();
+      const int ux_b = hard_macros[j]->getUXDBU();
+      const int uy_b = hard_macros[j]->getUYDBU();
+      // check if adjacent
+      const bool x_flag = std::abs(lx - lx_b) < notch_h_th ||
+                          std::abs(lx - ux_b) < notch_h_th ||
+                          std::abs(ux - lx_b) < notch_h_th ||
+                          std::abs(uy - ux_b) < notch_h_th;
+      if (x_flag == false)
+        continue;
+      // try to move vertically
+      if (ly_b >= ly && ly_b < ly + notch_v_th && ly_b < uy)
+        flags[j] = moveVer(j, ly);
+      else if (ly_b >= uy && ly_b <= uy + notch_v_th)
+        flags[j] = moveVer(j, uy);
+      // check if moved correctly
+      if (flags[j] == true) {
+        macro_queue.push(j); 
+      }     
+    }
+  }
+
 }
 
 void HierRTLMP::setDebug()

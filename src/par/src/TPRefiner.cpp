@@ -2266,6 +2266,8 @@ void TPilpRefine::SolveIlpInstance(std::shared_ptr<TPilpGraph> hgraph,
                                    TP_partition& refined_partition,
                                    const matrix<float>& max_block_balance)
 {
+  SolveIlpInstanceOR(hgraph, refined_partition, max_block_balance);
+  return;
   // Build CP Model
   CpModelBuilder cp_model;
   // Variables

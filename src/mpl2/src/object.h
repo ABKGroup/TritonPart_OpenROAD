@@ -393,6 +393,61 @@ class HardMacro
   // update the location and orientation of the macro inst in OpenDB
   // The macro should be snaped to placement grids
   void updateDb(float pitch_x, float pitch_y);
+  int getXDBU() const {
+    return micronToDbu(getX(), dbu_);
+  }
+
+  int getYDBU() const {
+    return micronToDbu(getY(), dbu_);
+  }
+
+  int getRealXDBU() const {
+    return micronToDbu(getRealX(), dbu_);
+  }
+
+  int getRealYDBU() const {
+    return micronToDbu(getRealY(), dbu_);
+  }
+
+  int getWidthDBU() const {
+    return micronToDbu(getWidth(), dbu_);
+  }
+
+  int getHeightDBU() const {
+    return micronToDbu(getHeight(), dbu_);
+  }
+
+  int getRealWidthDBU() const {
+    return micronToDbu(getRealWidth(), dbu_);
+  }
+
+  int getRealHeightDBU() const {
+    return micronToDbu(getRealHeight(), dbu_);
+  }
+
+  int getUXDBU() const {
+    return getXDBU() + getWidthDBU();
+  }
+
+  int getUYDBU() const {
+    return getYDBU() + getHeightDBU();
+  }
+
+  int getRealUXDBU() const {
+    return getRealXDBU() + getRealWidthDBU();
+  }
+
+  int getRealUYDBU() const {
+    return getRealYDBU() + getRealHeightDBU();
+  }
+
+  void setXDBU(int x) {
+    setX(dbuToMicron(x, dbu_));
+  } 
+
+  void setYDBU(int y) {
+    setY(dbuToMicron(y, dbu_));
+  } 
 
  private:
   // We define x_, y_ and orientation_ here

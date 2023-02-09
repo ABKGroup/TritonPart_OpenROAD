@@ -232,6 +232,9 @@ class HierRTLMP
   void callBusPlanning(std::vector<SoftMacro>& shaped_macros,
                        std::vector<BundledNet>& nets_old);
 
+  // Align all the macros globally to reduce the waste of empty space
+  void alignHardMacroGlobal(); // call this function after multilevel macro placement
+
   sta::dbNetwork* network_ = nullptr;
   odb::dbDatabase* db_ = nullptr;
   odb::dbBlock* block_ = nullptr;
@@ -275,9 +278,8 @@ class HierRTLMP
   float pin_access_net_width_ratio_
       = 0.1;  // define the ratio of number of connections
               // related to IOs to the range of these IO spans
-  float notch_v_th_ = 10.0;
-  float notch_h_th_ = 10.0;
-
+  float notch_v_th_ = 50.0;
+  float notch_h_th_ = 50.0;
   int snap_layer_ = 4;
   float pitch_x_ = 0.0;
   float pitch_y_ = 0.0;
