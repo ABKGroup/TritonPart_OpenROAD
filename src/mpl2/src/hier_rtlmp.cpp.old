@@ -447,7 +447,7 @@ void HierRTLMP::hierRTLMacroPlacer()
   multiLevelMacroPlacement(root_cluster_);
   logger_->report("Finished Multi-level Macro Placement.\n");
   logger_->report("Align macros globally");
-  //alignHardMacroGlobal();
+  alignHardMacroGlobal();
   // update the positions of macros
   for (auto& [inst, hard_macro] : hard_macro_map_) {
     hard_macro->updateDb(pitch_x_, pitch_y_);
@@ -3638,8 +3638,6 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
     }
   }
 
-  // align the macros globally
-  alignHardMacroGlobal(parent);
   // delete SA containers to avoid memory leakage
   sa_containers.clear();
   // done this branch and update the cluster_id property back
@@ -4100,30 +4098,17 @@ void HierRTLMP::hardMacroClusterMacroPlacement(Cluster* cluster)
 
 
 // Align all the macros globally to reduce the waste of standard cell space
-void HierRTLMP::alignHardMacroGlobal(Cluster* parent) {
-  // get the floorplan information
-  const odb::Rect core_box = block_->getCoreArea();
-  int core_lx = core_box.xMin();
-  int core_ly = core_box.yMin();
-  int core_ux = core_box.xMax();
-  int core_uy = core_box.yMax();
-  // if the current parent cluster is not the root cluster
-  if (parent->getParent() != nullptr) {
-    core_lx = micronToDbu(parent->getX(), dbu_);
-    core_ly = micronToDbu(parent->getY(), dbu_);
-    core_ux = micronToDbu(parent->getX() + parent->getWidth(), dbu_);
-    core_uy = micronToDbu(parent->getY() + parent->getHeight(), dbu_);
-  }
-  
-  std::vector<HardMacro*> hard_macros = parent->getHardMacros();
+void HierRTLMP::alignHardMacroGlobal() {
+  std::vector<HardMacro*> hard_macros;
   int boundary_v_th = std::numeric_limits<int>::max();
   int boundary_h_th = std::numeric_limits<int>::max();
-  for (auto& macro_inst : hard_macros) {
-    boundary_h_th = std::min(boundary_h_th, macro_inst->getRealWidthDBU());
-    boundary_v_th = std::min(boundary_v_th, macro_inst->getRealHeightDBU());
+  for (auto& macro_inst : hard_macro_map_) {
+    hard_macros.push_back(macro_inst.second);
+    boundary_h_th = std::min(boundary_h_th, macro_inst.second->getRealWidthDBU());
+    boundary_v_th = std::min(boundary_v_th, macro_inst.second->getRealHeightDBU());
   }
-  const int notch_v_th = std::min(micronToDbu(notch_v_th_, dbu_), boundary_v_th);
-  const int notch_h_th = std::min(micronToDbu(notch_h_th_, dbu_), boundary_h_th);
+  const int notch_v_th = std::max(micronToDbu(notch_v_th_, dbu_), boundary_v_th);
+  const int notch_h_th = std::max(micronToDbu(notch_h_th_, dbu_), boundary_h_th);
   //const int notch_v_th = micronToDbu(notch_v_th_, dbu_) + boundary_v_th;
   //const int notch_h_th = micronToDbu(notch_h_th_, dbu_) + boundary_h_th;
   logger_->report("boundary_h_th : {}, boundary_v_th : {}", 
@@ -4132,6 +4117,12 @@ void HierRTLMP::alignHardMacroGlobal(Cluster* parent) {
   logger_->report("notch_h_th : {}, notch_v_th : {}", 
                    dbuToMicron(notch_h_th, dbu_),
                    dbuToMicron(notch_v_th, dbu_));
+  // get the floorplan information
+  const odb::Rect core_box = block_->getCoreArea();
+  const int core_lx = core_box.xMin();
+  const int core_ly = core_box.yMin();
+  const int core_ux = core_box.xMax();
+  const int core_uy = core_box.yMax();
   // define lamda function for check if the move is allowed
   auto isValidMove = [&](size_t macro_id) {
     // check if the macro can fit into the core area

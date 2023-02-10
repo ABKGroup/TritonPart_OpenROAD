@@ -193,7 +193,7 @@ class Cluster
   const std::vector<odb::dbModule*> getDbModules() const;
   const std::vector<odb::dbInst*> getLeafStdCells() const;
   const std::vector<odb::dbInst*> getLeafMacros() const;
-  const std::vector<HardMacro*> getHardMacros() const;
+  std::vector<HardMacro*> getHardMacros() const;
   void clearDbModules();
   void clearLeafStdCells();
   void clearLeafMacros();

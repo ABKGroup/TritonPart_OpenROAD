@@ -233,7 +233,7 @@ class HierRTLMP
                        std::vector<BundledNet>& nets_old);
 
   // Align all the macros globally to reduce the waste of empty space
-  void alignHardMacroGlobal(); // call this function after multilevel macro placement
+  void alignHardMacroGlobal(Cluster* parent); // call this function after multilevel macro placement
 
   sta::dbNetwork* network_ = nullptr;
   odb::dbDatabase* db_ = nullptr;
