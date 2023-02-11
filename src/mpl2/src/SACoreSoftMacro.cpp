@@ -296,9 +296,7 @@ void SACoreSoftMacro::initialize()
   norm_boundary_penalty_ = calAverage(boundary_penalty_list);
   norm_macro_blockage_penalty_ = calAverage(macro_blockage_penalty_list);
   norm_notch_penalty_ = calAverage(notch_penalty_list);
-
   // Reset penalites if lower than threshold
-
   if (norm_area_penalty_ <= 1e-4)
     norm_area_penalty_ = 1.0;
 
@@ -337,6 +335,37 @@ void SACoreSoftMacro::initialize()
     notch_penalty_ = notch_penalty_list[i];
     cost_list.push_back(calNormCost());
   }
+  // dynamically adjust the weighting scheme
+  const float mean_tot_cost = calAverage(cost_list);
+  const float weight_sum =  area_weight_
+                          + outline_weight_
+                          + wirelength_weight_
+                          + guidance_weight_
+                          + fence_weight_
+                          + boundary_weight_
+                          + macro_blockage_weight_
+                          + original_notch_weight_;
+  area_weight_ += learning_rate_ * (area_weight_ / weight_sum * mean_tot_cost / norm_area_penalty_);
+  outline_weight_ += learning_rate_ * (outline_weight_ / weight_sum * mean_tot_cost / norm_outline_penalty_);
+  wirelength_weight_ += learning_rate_ * (wirelength_weight_ / weight_sum * mean_tot_cost / norm_wirelength_);
+  guidance_weight_ += learning_rate_ * (guidance_weight_ / weight_sum * mean_tot_cost / norm_guidance_penalty_);
+  fence_weight_ += learning_rate_ * (fence_weight_ / weight_sum * mean_tot_cost / norm_fence_penalty_);
+  boundary_weight_ += learning_rate_ * (boundary_weight_ / weight_sum * mean_tot_cost / norm_boundary_penalty_);
+  macro_blockage_weight_ += learning_rate_ * (macro_blockage_weight_ / weight_sum * mean_tot_cost / norm_macro_blockage_penalty_);
+  original_notch_weight_ += learning_rate_ * (original_notch_weight_ / weight_sum * mean_tot_cost / norm_notch_penalty_);
+  
+  /*
+  area_weight_ = std::max(area_weight_, 0.01f);
+  outline_weight_ = std::max(outline_weight_, 1.0f);
+  wirelength_weight_ = std::max(wirelength_weight_, 1.0f);
+  guidance_weight_ = std::max(guidance_weight_, 1.0f);
+  fence_weight_ = std::max(fence_weight_, 1.0f);
+  boundary_weight_ = std::max(boundary_weight_, 1.0f);
+  macro_blockage_weight_ = std::max(macro_blockage_weight_, 1.0f);
+  original_notch_weight_ = std::max(original_notch_weight_, 1.0f);
+  */  
+
+
   float delta_cost = 0.0;
   for (int i = 1; i < cost_list.size(); i++) {
     delta_cost += std::abs(cost_list[i] - cost_list[i - 1]);

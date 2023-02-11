@@ -38,6 +38,7 @@
 #include <queue>
 #include <thread>
 #include <algorithm>
+#include <numeric>
 
 // Partitioner note : currently we are still using MLPart to partition large
 // flat clusters Later this will be replaced by our TritonPart
@@ -3201,7 +3202,7 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
   }
   file.close();
 
-  // Call Simulated Annealing Engine to place children
+  // Call Simulated Annealing Engine to place childr
   // set the action probabilities
   // the summation of probabilities should be one.
   const float action_sum = pos_swap_prob_ + neg_swap_prob_ + double_swap_prob_
@@ -3290,6 +3291,58 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
           run_id,
           target_util,
           target_dead_space);
+      /*
+      // perform force-directed placement
+      // create blocks based on macros
+      std::vector<Rect> blocks;
+      for (auto& macro : shaped_macros) {
+        if (macro.getWidth() * macro.getHeight() <= 0.0) {
+          blocks.push_back(Rect(macro.getX(), macro.getY(), 
+                                macro.getX() + macro.getWidth(), 
+                                macro.getY() + macro.getHeight(), true));
+        } else {
+          blocks.push_back(Rect(macro.getX(), macro.getY(), 
+                                macro.getX() + macro.getWidth(), 
+                                macro.getY() + macro.getHeight(), false));
+        }
+      }
+      FDPlacement(blocks, nets, outline_width, outline_height, parent->getName() + "_" + std::to_string(run_id));
+      */
+      // perform force-directed placement
+        // create blocks based on macros
+        std::vector<Rect> blocks;
+        std::map<int, Rect> guides_new = guides; 
+        for (auto& macro : shaped_macros) {
+          if (macro.getWidth() * macro.getHeight() <= 0.0) {
+            blocks.push_back(Rect(macro.getX(), macro.getY(), 
+                                  macro.getX() + macro.getWidth(), 
+                                  macro.getY() + macro.getHeight(), true));
+          } else {
+            blocks.push_back(Rect(macro.getX(), macro.getY(), 
+                                  macro.getX() + macro.getWidth(), 
+                                  macro.getY() + macro.getHeight(), false));
+          }
+        }
+        FDPlacement(blocks, nets, outline_width, outline_height, parent->getName() + "_" + std::to_string(run_id));
+        for (auto macro_id = 0; macro_id < blocks.size(); macro_id++) {
+          if (shaped_macros[macro_id].isMixedCluster() || 
+              shaped_macros[macro_id].isMacroCluster()) {
+            if (guides_new.find(macro_id) == guides_new.end()) {
+              guides_new[macro_id] = blocks[macro_id];
+            } else {
+              guides_new[macro_id].merge(blocks[macro_id]);
+            }
+          }
+        } 
+        logger_->report("guidance information");
+        for (auto& [macro_id, rect] : guides_new) {
+          logger_->report("cluster : {}, lx = {}, ly = {}, ux = {}, uy = {}",
+                          shaped_macros[macro_id].getName(),
+                          rect.lx, rect.ly, rect.ux, rect.uy);
+          
+        }
+      
+      
       // Note that all the probabilities are normalized to the summation of 1.0.
       // Note that the weight are not necessaries summarized to 1.0, i.e., not
       // normalized.
@@ -3322,7 +3375,7 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
           graphics_.get(),
           logger_);
       sa->setFences(fences);
-      sa->setGuides(guides);
+      sa->setGuides(guides_new);
       sa->setNets(nets);
       sa->setBlockages(blockages);
       sa->setBlockages(macro_blockages);
@@ -3502,6 +3555,39 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
             run_id,
             target_util,
             target_dead_space);
+        // perform force-directed placement
+        // create blocks based on macros
+        std::vector<Rect> blocks;
+        std::map<int, Rect> guides_new = guides; 
+        for (auto& macro : shaped_macros) {
+          if (macro.getWidth() * macro.getHeight() <= 0.0) {
+            blocks.push_back(Rect(macro.getX(), macro.getY(), 
+                                  macro.getX() + macro.getWidth(), 
+                                  macro.getY() + macro.getHeight(), true));
+          } else {
+            blocks.push_back(Rect(macro.getX(), macro.getY(), 
+                                  macro.getX() + macro.getWidth(), 
+                                  macro.getY() + macro.getHeight(), false));
+          }
+        }
+        FDPlacement(blocks, nets, outline_width, outline_height, parent->getName() + "_" + std::to_string(run_id));
+        for (auto macro_id = 0; macro_id < blocks.size(); macro_id++) {
+          if (shaped_macros[macro_id].isMixedCluster() || 
+              shaped_macros[macro_id].isMacroCluster()) {
+            if (guides_new.find(macro_id) == guides_new.end()) {
+              guides_new[macro_id] = blocks[macro_id];
+            } else {
+              guides_new[macro_id].merge(blocks[macro_id]);
+            }
+          }
+        } 
+        logger_->report("guidance information");
+        for (auto& [macro_id, rect] : guides_new) {
+          logger_->report("cluster : {}, lx = {}, ly = {}, ux = {}, uy = {}",
+                          shaped_macros[macro_id].getName(),
+                          rect.lx, rect.ly, rect.ux, rect.uy);
+          
+        }
         // Note that all the probabilities are normalized to the summation
         // of 1.0. Note that the weight are not necessaries summarized to 1.0,
         // i.e., not normalized.
@@ -3534,7 +3620,7 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
             graphics_.get(),
             logger_);
         sa->setFences(fences);
-        sa->setGuides(guides);
+        sa->setGuides(guides_new);
         sa->setNets(nets);
         sa->setBlockages(blockages);
         sa->setBlockages(macro_blockages);
@@ -4473,6 +4559,156 @@ void HierRTLMP::alignHardMacroGlobal(Cluster* parent) {
     }
   }
 
+}
+
+// force-directed placement to generate guides for macros
+void HierRTLMP::FDPlacement(std::vector<Rect>& blocks, 
+                   const std::vector<BundledNet>& nets,
+                   float outline_width,
+                   float outline_height,
+                   std::string file_name)
+{
+  // following the ideas of Circuit Training  
+  logger_->report("*****************************************************************");
+  logger_->report("Start force-directed placement");
+  const float ar = outline_height / outline_width;
+  const std::vector<int> num_steps { 1000, 1000, 1000, 100};
+  const std::vector<float> attract_factors { -1.0, 100.0, 0.01, 100.0 };
+  const std::vector<float> repel_factors {100.0, 100.0, 100.0, 100.0}; 
+  const float io_factor = 10.0;
+  const float max_size = std::max(outline_width, outline_height) * 10.0;
+  std::mt19937 rand_gen(random_seed_);
+  std::uniform_real_distribution<float> distribution(0.0, 1.0);
+  
+  auto calcAttractiveForce = [&](float attract_factor) {
+    for (auto& net : nets) {
+      const int& src = net.terminals.first;
+      const int& sink = net.terminals.second;
+      float k = net.weight * attract_factor;
+      if (blocks[src].fixed_flag == true || blocks[sink].fixed_flag == true)
+        k = k * io_factor;
+      const float x_dist = (blocks[src].getX() - blocks[sink].getX()) / max_size;
+      const float y_dist = (blocks[src].getY() - blocks[sink].getY()) / max_size;
+      const float dist = std::sqrt(x_dist * x_dist + y_dist * y_dist);
+      const float f_x = k * x_dist * dist;
+      const float f_y = k * y_dist * dist;
+      blocks[src].addForce(-1.0 * f_x, -1.0 * f_y);
+      blocks[sink].addForce(f_x, f_y); 
+    }
+  };
+
+  auto calcRepulsiveForce  = [&](float repulsive_factor) {
+    std::vector<int> macros(blocks.size());
+    std::iota(macros.begin(), macros.end(), 0);
+    std::sort(macros.begin(), macros.end(), 
+              [&](int src, int target) {
+                return blocks[src].lx < blocks[target].lx;
+              });
+    // traverse all the macros
+    auto iter = macros.begin();
+    while (iter != macros.end()) {
+      int src = *iter;
+      for (auto iter_loop = ++iter; iter_loop != macros.end(); iter_loop++) {
+        int target = *iter_loop;
+        if (blocks[src].ux <= blocks[target].lx)
+          break;
+        if (blocks[src].ly >= blocks[target].uy || blocks[src].uy <= blocks[target].ly)
+          continue;
+        if (blocks[src].getWidth() < 1.0 || blocks[src].getHeight() < 1.0 ||
+            blocks[target].getWidth() < 1.0 || blocks[target].getHeight() < 1.0)
+          continue;
+        // apply the force from src to target
+        if (src > target)
+          std::swap(src, target);
+        // check the overlap
+        const float x_min_dist = (blocks[src].getWidth() + blocks[target].getWidth()) / 2.0;
+        const float y_min_dist = (blocks[src].getHeight() + blocks[target].getHeight()) / 2.0;
+        const float x_overlap = std::abs(blocks[src].getX() - blocks[target].getX()) - x_min_dist;
+        const float y_overlap = std::abs(blocks[src].getY() - blocks[target].getY()) - y_min_dist;
+        if (x_overlap <= 0.0 && y_overlap <= 0.0) {
+          float x_dist = (blocks[src].getX() - blocks[target].getX()) / max_size;
+          float y_dist = (blocks[src].getY() - blocks[target].getY()) / max_size;
+          float dist = std::sqrt(x_dist * x_dist + y_dist * y_dist);
+          const float min_dist = 0.01;
+          if (dist <= min_dist) {
+            x_dist = std::sqrt(min_dist);
+            y_dist = std::sqrt(min_dist);
+            dist = min_dist;
+          }
+          const float f_x = repulsive_factor * x_dist / (dist * dist);
+          const float f_y = repulsive_factor * y_dist / (dist * dist);
+          /*
+          const float prob = distribution(rand_gen);
+          if (prob <= 0.25) {
+            f_x = 0.0;
+          } else if (prob <= 0.5) {
+            f_y = 0.0;
+          } else if (prob <= 0.75) {
+            f_x = 0.0;
+            f_y = 0.0;
+          }
+          */
+          blocks[src].addForce(f_x, f_y);
+          blocks[target].addForce(-1.0 * f_x, -1.0 * f_y);
+        }
+      }
+    }
+  };
+
+  auto MoveBlock = [&](float attract_factor, float repulsive_factor, 
+                       float max_move_dist) {
+    for (auto& block : blocks)
+      block.resetForce();
+    if (attract_factor > 0) {
+      calcAttractiveForce(attract_factor);
+    }
+    if (repulsive_factor > 0) {
+      calcRepulsiveForce(repulsive_factor);
+    }
+    // normalization
+    float max_f_x = 0.0;
+    float max_f_y = 0.0;
+    for (auto& block : blocks) {
+      max_f_x = std::max(max_f_x, std::abs(block.f_x));
+      max_f_y = std::max(max_f_y, std::abs(block.f_y));
+    }
+    max_f_x = std::max(max_f_x, 1.0f);
+    max_f_y = std::max(max_f_y, 1.0f);
+    // Move node
+    // The move will be cancelled if the block will be pushed out of the boundary
+    for (auto& block : blocks) {
+      const float x_dist = block.f_x / max_f_x * max_move_dist;
+      const float y_dist = block.f_y / max_f_y * max_move_dist;
+      block.move(x_dist, y_dist, 0.0f, 0.0f, outline_width, outline_height);
+    }
+  };
+
+  // initialize all the macros
+  for (auto& block : blocks) {
+    block.setLoc(outline_width * distribution(rand_gen),  outline_height * distribution(rand_gen));
+    block.makeSquare(ar);
+  }
+  
+  // Iteratively place the blocks
+  for (auto i = 0; i < num_steps.size(); i++) {
+    //const float max_move_dist = max_size / num_steps[i];
+    const float attract_factor = attract_factors[i];
+    const float repulsive_factor = repel_factors[i];
+    for (auto j = 0; j < num_steps[i]; j++)
+      MoveBlock(attract_factor, repulsive_factor, max_size / (j + 1));
+  }
+
+  std::string net_file = file_name + ".net.txt";
+  std::string block_file = file_name + ".block.txt";
+  std::ofstream file;
+  file.open(block_file);
+  for (auto& rect : blocks)
+    file << rect.lx << " " << rect.ly << "  " << rect.ux << "  " << rect.uy << std::endl;
+  file.close();
+  file.open(net_file);
+  for (auto& net : nets)
+    file << net.terminals.first << "  " << net.terminals.second << "  " << net.weight << std::endl;
+  file.close();
 }
 
 void HierRTLMP::setDebug()

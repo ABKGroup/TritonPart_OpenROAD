@@ -41,6 +41,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <iostream>
 
 #include "odb/dbTypes.h"
 
@@ -648,8 +649,8 @@ struct BundledNet
 struct Rect
 {
   Rect() {}
-  Rect(const float lx, const float ly, const float ux, const float uy)
-      : lx(lx), ly(ly), ux(ux), uy(uy)
+  Rect(const float lx, const float ly, const float ux, const float uy, bool fixed_flag = false)
+      : lx(lx), ly(ly), ux(ux), uy(uy), fixed_flag(fixed_flag)
   {
   }
 
@@ -657,6 +658,89 @@ struct Rect
   float yMin() const { return ly; }
   float xMax() const { return ux; }
   float yMax() const { return uy; }
+
+  float getX() const {
+    return (lx + ux) / 2.0;
+  }
+
+  float getY() const {
+    return (ly + uy) / 2.0;
+  }
+
+  inline float getWidth() const {
+    return ux - lx;
+  }
+
+  inline float getHeight() const {
+    return uy - ly;
+  }
+
+  void setLoc(float x, float y) {
+    if (fixed_flag == true)
+      return;
+
+    const float width = ux - lx;
+    const float height = uy - ly;
+    lx = x - width / 2.0;
+    ly = y - height / 2.0;
+    ux = x + width / 2.0;
+    uy = y + height / 2.0;
+  }
+    
+  inline void moveHor(float dist) {
+    lx = lx + dist;
+    ux = ux + dist;
+  }
+
+  inline void moveVer(float dist) {
+    ly = ly + dist;
+    uy = uy + dist;
+  }
+
+
+  inline void move(float x_dist, float y_dist, float core_lx, float core_ly, float core_ux, float core_uy) {
+    if (fixed_flag == true)
+      return;
+    moveHor(x_dist);
+    moveVer(y_dist);
+    if (lx < core_lx)
+      moveHor(core_lx - lx);
+    if (ux > core_ux)
+      moveHor(core_ux - ux);
+    if (ly < core_ly)
+      moveVer(core_ly - ly);
+    if (uy > core_uy)
+      moveVer(core_uy - uy);
+    if (lx < core_lx - 1.0 || ly < core_ly - 1.0 || ux > core_ux + 1.0 || uy > core_uy + 1.0)
+      std::cout << "Error !!!\n" 
+                << "core_lx =  " << core_lx << "  "
+                << "core_ly =  " << core_ly << "  "
+                << "core_ux =  " << core_ux << "  "
+                << "core_uy =  " << core_uy << std::endl;
+  }
+
+  inline void resetForce() {
+    f_x = 0.0;
+    f_y = 0.0;
+  }
+
+  inline void makeSquare(float ar = 1.0) {
+    if (fixed_flag == true)
+      return;
+    const float x = getX();
+    const float y = getY();
+    const float width = std::sqrt(getWidth() * getHeight() * ar);
+    const float height = getWidth() * getHeight() / width;
+    lx = x - width / 2.0;
+    ly = y - height / 2.0;
+    ux = x + width / 2.0;
+    uy = y + height / 2.0; 
+  }
+
+  inline void addForce(float f_x_, float f_y_) {
+    f_x += f_x_;
+    f_y += f_y_;
+  }
 
   bool isValid() const
   {
@@ -696,6 +780,11 @@ struct Rect
   float ly = 0.0;
   float ux = 0.0;
   float uy = 0.0;
+  
+  // for force-directed placement
+  float f_x = 0.0;
+  float f_y = 0.0;
+  bool fixed_flag = false;
 };
 
 }  // namespace mpl2

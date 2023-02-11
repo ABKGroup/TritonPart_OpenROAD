@@ -235,6 +235,13 @@ class HierRTLMP
   // Align all the macros globally to reduce the waste of empty space
   void alignHardMacroGlobal(Cluster* parent); // call this function after multilevel macro placement
 
+  // force-directed placement to generate guides for macros
+  void FDPlacement(std::vector<Rect>& blocks, 
+                   const std::vector<BundledNet>& nets,
+                   float outline_width,
+                   float outline_height,
+                   std::string file_name);
+
   sta::dbNetwork* network_ = nullptr;
   odb::dbDatabase* db_ = nullptr;
   odb::dbBlock* block_ = nullptr;
