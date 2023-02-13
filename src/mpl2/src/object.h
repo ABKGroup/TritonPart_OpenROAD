@@ -675,7 +675,7 @@ struct Rect
     return uy - ly;
   }
 
-  void setLoc(float x, float y) {
+  void setLoc(float x, float y, float core_lx, float core_ly, float core_ux, float core_uy) {
     if (fixed_flag == true)
       return;
 
@@ -685,6 +685,25 @@ struct Rect
     ly = y - height / 2.0;
     ux = x + width / 2.0;
     uy = y + height / 2.0;
+    if (lx < core_lx) {
+      lx = core_lx;
+      ux = lx + width;
+    }
+
+    if (ly < core_ly) {
+      ly = core_ly;
+      uy = ly + height;
+    }
+
+    if (ux > core_ux) {
+      lx = core_ux - width;
+      ux = core_ux;
+    }
+
+    if (uy > core_uy) {
+      ly = core_uy - height;
+      uy = core_uy;
+    }
   }
     
   inline void moveHor(float dist) {
@@ -703,14 +722,28 @@ struct Rect
       return;
     moveHor(x_dist);
     moveVer(y_dist);
-    if (lx < core_lx)
-      moveHor(core_lx - lx);
-    if (ux > core_ux)
-      moveHor(core_ux - ux);
-    if (ly < core_ly)
-      moveVer(core_ly - ly);
-    if (uy > core_uy)
-      moveVer(core_uy - uy);
+    const float width = getWidth();
+    const float height = getHeight();
+    if (lx < core_lx) {
+      lx = core_lx;
+      ux = lx + width;
+    }
+
+    if (ly < core_ly) {
+      ly = core_ly;
+      uy = ly + height;
+    }
+
+    if (ux > core_ux) {
+      lx = core_ux - width;
+      ux = core_ux;
+    }
+
+    if (uy > core_uy) {
+      ly = core_uy - height;
+      uy = core_uy;
+    }
+
     if (lx < core_lx - 1.0 || ly < core_ly - 1.0 || ux > core_ux + 1.0 || uy > core_uy + 1.0)
       std::cout << "Error !!!\n" 
                 << "core_lx =  " << core_lx << "  "
@@ -720,6 +753,10 @@ struct Rect
   }
 
   inline void resetForce() {
+    f_x_a = 0.0;
+    f_y_a = 0.0;
+    f_x_r = 0.0;
+    f_y_r = 0.0;
     f_x = 0.0;
     f_y = 0.0;
   }
@@ -729,17 +766,27 @@ struct Rect
       return;
     const float x = getX();
     const float y = getY();
-    const float width = std::sqrt(getWidth() * getHeight() * ar);
-    const float height = getWidth() * getHeight() / width;
+    const float height = std::sqrt(getWidth() * getHeight() * ar);
+    const float width = getWidth() * getHeight() / height;
     lx = x - width / 2.0;
     ly = y - height / 2.0;
     ux = x + width / 2.0;
     uy = y + height / 2.0; 
   }
 
-  inline void addForce(float f_x_, float f_y_) {
-    f_x += f_x_;
-    f_y += f_y_;
+  inline void addAttractiveForce(float f_x, float f_y) {
+    f_x_a += f_x;
+    f_y_a += f_y;
+  }
+
+  inline void addRepulsiveForce(float f_x, float f_y) {
+    f_x_r += f_x;
+    f_y_r += f_y;
+  }
+
+  inline void setForce(float f_x_, float f_y_) {
+    f_x = f_x_;
+    f_y = f_y_;
   }
 
   bool isValid() const
@@ -782,8 +829,18 @@ struct Rect
   float uy = 0.0;
   
   // for force-directed placement
+  // attractive force
+  float f_x_a = 0.0; 
+  float f_y_a = 0.0;  
+
+  // repulsive force
+  float f_x_r = 0.0;
+  float f_y_r = 0.0;
+
+  // total force
   float f_x = 0.0;
   float f_y = 0.0;
+
   bool fixed_flag = false;
 };
 

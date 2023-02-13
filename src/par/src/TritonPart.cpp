@@ -200,13 +200,27 @@ void TritonPart::ReadHypergraph(std::string hypergraph_file,
 // Convert the netlist into hypergraphs
 void TritonPart::ReadNetlist()
 {
+  // initialize other parameters
+  // Set the flag variables
+  vertex_dimensions_ = 1;
+  hyperedge_dimensions_ = 1;
+  placement_dimensions_ = 0;
+  timing_aware_flag_ = true;
+  
   // assign vertex_id property of each instance and each IO port
   int vertex_id = 0;
   for (auto term : block_->getBTerms()) {
     odb::dbIntProperty::create(term, "vertex_id", vertex_id++);
+    std::vector<float> vwts(vertex_dimensions_, 0.0);
+    vertex_weights_.push_back(vwts);
   }
+  const float dbu = db_->getTech()->getDbUnitsPerMicron();
   for (auto inst : block_->getInsts()) {
     odb::dbIntProperty::create(inst, "vertex_id", vertex_id++);
+    const odb::dbMaster* master = inst->getMaster();
+    const float area = master->getWidth() * master->getHeight() / dbu / dbu;
+    std::vector<float> vwts(vertex_dimensions_, area);
+    vertex_weights_.push_back(vwts);
   }
   num_vertices_ = vertex_id;
 
@@ -251,23 +265,12 @@ void TritonPart::ReadNetlist()
     // Ignore all the single-vertex hyperedge
     if (hyperedge.size() > 1 && hyperedge.size() <= global_net_threshold_) {
       hyperedges_.push_back(hyperedge);
-      hyperedge_weights_.push_back(std::vector<float>(1, 1.0));
+      hyperedge_weights_.push_back(std::vector<float>(hyperedge_dimensions_, 1.0));
       odb::dbIntProperty::find(net, "hyperedge_id")->setValue(hyperedge_id++);
     }
   }  // finish hyperedge
 
   num_hyperedges_ = static_cast<int>(hyperedges_.size());
-
-  // initialize other parameters
-  // Set the flag variables
-  vertex_dimensions_ = 1;
-  hyperedge_dimensions_ = 1;
-  placement_dimensions_ = 0;
-  timing_aware_flag_ = true;
-  for (int i = 0; i < num_vertices_; i++) {
-    std::vector<float> vwts(vertex_dimensions_, 1.0);
-    vertex_weights_.push_back(vwts);
-  }
 
   // add timing feature
   if (timing_aware_flag_ == true)

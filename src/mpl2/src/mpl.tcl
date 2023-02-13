@@ -87,7 +87,7 @@ proc rtl_macro_placer { args } {
     set tolerance     0.1
     set max_num_level 2
     set coarsening_ratio  10.0
-    set num_bundled_ios   3
+    set num_bundled_ios   10
     set large_net_threshold 50
     set signature_net_threshold 50
     set halo_width   0.0
@@ -100,13 +100,15 @@ proc rtl_macro_placer { args } {
     set outline_weight 100.0
     set wirelength_weight 100.0
     set guidance_weight 10.0
-    set fence_weight   10.0
-    set boundary_weight 20.0
+    set fence_weight   20.0
+    #set boundary_weight 20.0
+    set boundary_weight 25.0
     set notch_weight    10.0
     set macro_blockage_weight 10.0
     set pin_access_th   0.00
     set target_util 0.25
     set target_dead_space 0.05
+    #set min_ar  0.33
     set min_ar  0.33
     set snap_layer -1
     set report_directory "hier_rtlmp"

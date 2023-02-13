@@ -384,7 +384,7 @@ class HierRTLMP
   // we only consider bus when we do bus planning
   const int bus_net_threshold_ = 32;
   // the weight used for balance timing and congestion
-  const float congestion_weight_ = 0.5;
+  float congestion_weight_ = 0.5;
 
   // Determine if the cluster is macro dominated
   // if num_std_cell * macro_dominated_cluster_threshold_ < num_macro

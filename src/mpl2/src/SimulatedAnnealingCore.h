@@ -102,6 +102,14 @@ class SimulatedAnnealingCore
   float getFencePenalty() const;
   float getNormFencePenalty() const;
   void getMacros(std::vector<T>& macros) const;
+  inline float getOutlineWidth() const {
+    return outline_width_;
+  }
+  
+  inline float getOutlineHeight() const {
+    return outline_height_;
+  }
+
 
   // Initialize the SA worker
   virtual void initialize() = 0;
@@ -153,8 +161,7 @@ class SimulatedAnnealingCore
   float original_notch_weight_ = 0.0;
   float notch_weight_ = 0.0;
 
-  const float learning_rate_ = 0.0005; // dynamically weight adjustment
-
+  const float learning_rate_ = 0.01; // dynamically weight adjustment
 
   // Fast SA hyperparameter
   float init_prob_ = 0.0;
@@ -221,7 +228,7 @@ class SimulatedAnnealingCore
   std::vector<float> T_list_;     // store the temperature
   // we define accuracy to determine whether the floorplan is valid
   // because the error introduced by the type conversion
-  static constexpr float acc_tolerance_ = 0.01;
+  static constexpr float acc_tolerance_ = 0.1;
 };
 
 // SACore wrapper function

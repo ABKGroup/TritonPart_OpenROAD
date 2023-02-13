@@ -246,6 +246,16 @@ void HierRTLMP::hierRTLMacroPlacer()
   int core_ux = dbuToMicron(core_box.xMax(), dbu_);
   int core_uy = dbuToMicron(core_box.yMax(), dbu_);
 
+  std::vector<std::string> layers;
+  int tot_num_layer = 0;
+  for (odb::dbTechLayer* layer : db_->getTech()->getLayers()) {
+    if (layer->getType() == odb::dbTechLayerType::ROUTING) {
+      logger_->report("Layer : {}", layer->getName());
+      layers.push_back(layer->getName());
+      tot_num_layer++;
+    }
+  }
+
   logger_->info(
       MPL,
       2023,
@@ -288,6 +298,8 @@ void HierRTLMP::hierRTLMacroPlacer()
                 metrics_->getStdCellArea() + metrics_->getMacroArea(),
                 util,
                 core_util);
+  
+  std::string layer_name;
   // calculate the pitch_x and pitch_y based on the pins of macros
   for (auto& macro : hard_macro_map_) {
     odb::dbMaster* master = macro.first->getMaster();
@@ -296,6 +308,7 @@ void HierRTLMP::hierRTLMacroPlacer()
         for (odb::dbMPin* mpin : mterm->getMPins()) {
           for (odb::dbBox* box : mpin->getGeometry()) {
             odb::dbTechLayer* layer = box->getTechLayer();
+            layer_name = layer->getName();
             pitch_x_ = dbuToMicron(static_cast<float>(layer->getPitchX()), dbu_);
             pitch_y_ = dbuToMicron(static_cast<float>(layer->getPitchY()), dbu_);
           }
@@ -304,7 +317,20 @@ void HierRTLMP::hierRTLMacroPlacer()
     }
     break; // we just need to calculate pitch_x and pitch_y once    
   }
-  
+  snap_layer_ = 0;
+  for (int i = 0; i < layers.size(); i++) {
+    if (layers[i] == layer_name) {
+      snap_layer_ = i + 1;
+      continue;
+    }
+  }
+  if (snap_layer_ <= 0) {
+    congestion_weight_ = 0.0;
+  } else {
+    congestion_weight_ = 1.0 * snap_layer_ / layers.size();
+  }
+  logger_->report("snap_layer : {}  congestion_weight : {}", snap_layer_, congestion_weight_);
+
   //
   // Set defaults for min/max number of instances and macros if not set by user.
   //
@@ -3239,8 +3265,8 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
   }
   // The number of perturbations in each step should be larger than the
   // number of macros
-  const int num_perturb_per_step = (macros.size()  > num_perturb_per_step_)
-                                   ? macros.size()
+  const int num_perturb_per_step = (macros.size() > num_perturb_per_step_)
+                                   ? macros.size() 
                                    : num_perturb_per_step_;
   int run_thread = num_threads_;
   int remaining_runs = target_util_list.size();
@@ -3317,6 +3343,7 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
             blocks.push_back(Rect(macro.getX(), macro.getY(), 
                                   macro.getX() + macro.getWidth(), 
                                   macro.getY() + macro.getHeight(), true));
+            logger_->report("fixed block : {}", macro.getName());
           } else {
             blocks.push_back(Rect(macro.getX(), macro.getY(), 
                                   macro.getX() + macro.getWidth(), 
@@ -3564,6 +3591,7 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
             blocks.push_back(Rect(macro.getX(), macro.getY(), 
                                   macro.getX() + macro.getWidth(), 
                                   macro.getY() + macro.getHeight(), true));
+            logger_->report("Fixed block : {}", macro.getName());
           } else {
             blocks.push_back(Rect(macro.getX(), macro.getY(), 
                                   macro.getX() + macro.getWidth(), 
@@ -3678,6 +3706,11 @@ void HierRTLMP::multiLevelMacroPlacement(Cluster* parent)
       "[MultiLevelMacroPlacement] Finish Simulated Annealing for cluster {}",
       parent->getName());
   best_sa->printResults();
+  logger_->report("outline_width = {}, outline_height = {}, width = {}, height = {}",
+                   outline_width, outline_height, best_sa->getWidth(), best_sa->getHeight());
+  logger_->report("outline_width : {}, outline_height = {}, is_valid = {}",
+                   best_sa->getOutlineWidth(), best_sa->getOutlineHeight(), best_sa->isValid());
+
   // write the cost function. This can be used to tune the temperature schedule
   // and cost weight
   best_sa->writeCostFile(file_name + ".cost.txt");
@@ -4562,6 +4595,8 @@ void HierRTLMP::alignHardMacroGlobal(Cluster* parent) {
 }
 
 // force-directed placement to generate guides for macros
+// Attractive force and Repulsive force should be normalied separately
+// Because their values can vary a lot.
 void HierRTLMP::FDPlacement(std::vector<Rect>& blocks, 
                    const std::vector<BundledNet>& nets,
                    float outline_width,
@@ -4572,11 +4607,11 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
   logger_->report("*****************************************************************");
   logger_->report("Start force-directed placement");
   const float ar = outline_height / outline_width;
-  const std::vector<int> num_steps { 1000, 1000, 1000, 100};
-  const std::vector<float> attract_factors { -1.0, 100.0, 0.01, 100.0 };
-  const std::vector<float> repel_factors {100.0, 100.0, 100.0, 100.0}; 
-  const float io_factor = 10.0;
-  const float max_size = std::max(outline_width, outline_height) * 10.0;
+  const std::vector<int> num_steps { 1000, 1000, 1000, 1000};
+  const std::vector<float> attract_factors { 1.0, 100.0, 1.0, 1.0 };
+  const std::vector<float> repel_factors {1.0, 1.0, 100.0, 10.0}; 
+  const float io_factor = 1000.0;
+  const float max_size = std::max(outline_width, outline_height);
   std::mt19937 rand_gen(random_seed_);
   std::uniform_real_distribution<float> distribution(0.0, 1.0);
   
@@ -4584,16 +4619,19 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
     for (auto& net : nets) {
       const int& src = net.terminals.first;
       const int& sink = net.terminals.second;
-      float k = net.weight * attract_factor;
-      if (blocks[src].fixed_flag == true || blocks[sink].fixed_flag == true)
+      //float k = net.weight * attract_factor;
+      float k = net.weight;
+      if (blocks[src].fixed_flag == true || blocks[sink].fixed_flag == true ||
+          blocks[src].getWidth() < 1.0 || blocks[src].getHeight() < 1.0 ||
+          blocks[sink].getWidth() < 1.0 || blocks[sink].getHeight() < 1.0)
         k = k * io_factor;
       const float x_dist = (blocks[src].getX() - blocks[sink].getX()) / max_size;
       const float y_dist = (blocks[src].getY() - blocks[sink].getY()) / max_size;
       const float dist = std::sqrt(x_dist * x_dist + y_dist * y_dist);
       const float f_x = k * x_dist * dist;
       const float f_y = k * y_dist * dist;
-      blocks[src].addForce(-1.0 * f_x, -1.0 * f_y);
-      blocks[sink].addForce(f_x, f_y); 
+      blocks[src].addAttractiveForce(-1.0 * f_x, -1.0 * f_y);
+      blocks[sink].addAttractiveForce(f_x, f_y); 
     }
   };
 
@@ -4614,8 +4652,11 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
           break;
         if (blocks[src].ly >= blocks[target].uy || blocks[src].uy <= blocks[target].ly)
           continue;
+        // ignore the overlap between clusters and IO ports
         if (blocks[src].getWidth() < 1.0 || blocks[src].getHeight() < 1.0 ||
             blocks[target].getWidth() < 1.0 || blocks[target].getHeight() < 1.0)
+          continue;
+        if (blocks[src].fixed_flag == true || blocks[target].fixed_flag == true)
           continue;
         // apply the force from src to target
         if (src > target)
@@ -4626,8 +4667,8 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
         const float x_overlap = std::abs(blocks[src].getX() - blocks[target].getX()) - x_min_dist;
         const float y_overlap = std::abs(blocks[src].getY() - blocks[target].getY()) - y_min_dist;
         if (x_overlap <= 0.0 && y_overlap <= 0.0) {
-          float x_dist = (blocks[src].getX() - blocks[target].getX()) / max_size;
-          float y_dist = (blocks[src].getY() - blocks[target].getY()) / max_size;
+          float x_dist = (blocks[src].getX() - blocks[target].getX()) / x_min_dist;
+          float y_dist = (blocks[src].getY() - blocks[target].getY()) / y_min_dist;
           float dist = std::sqrt(x_dist * x_dist + y_dist * y_dist);
           const float min_dist = 0.01;
           if (dist <= min_dist) {
@@ -4635,21 +4676,12 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
             y_dist = std::sqrt(min_dist);
             dist = min_dist;
           }
-          const float f_x = repulsive_factor * x_dist / (dist * dist);
-          const float f_y = repulsive_factor * y_dist / (dist * dist);
-          /*
-          const float prob = distribution(rand_gen);
-          if (prob <= 0.25) {
-            f_x = 0.0;
-          } else if (prob <= 0.5) {
-            f_y = 0.0;
-          } else if (prob <= 0.75) {
-            f_x = 0.0;
-            f_y = 0.0;
-          }
-          */
-          blocks[src].addForce(f_x, f_y);
-          blocks[target].addForce(-1.0 * f_x, -1.0 * f_y);
+          //const float f_x = repulsive_factor * x_dist / (dist * dist);
+          //const float f_y = repulsive_factor * y_dist / (dist * dist);
+          const float f_x = x_dist / (dist * dist);
+          const float f_y = y_dist / (dist * dist);
+          blocks[src].addRepulsiveForce(f_x, f_y);
+          blocks[target].addRepulsiveForce(-1.0 * f_x, -1.0 * f_y);
         }
       }
     }
@@ -4666,27 +4698,36 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
       calcRepulsiveForce(repulsive_factor);
     }
     // normalization
-    float max_f_x = 0.0;
-    float max_f_y = 0.0;
+    float max_f_a = 0.0;
+    float max_f_r = 0.0;
+    float max_f = 0.0;
     for (auto& block : blocks) {
-      max_f_x = std::max(max_f_x, std::abs(block.f_x));
-      max_f_y = std::max(max_f_y, std::abs(block.f_y));
+      max_f_a = std::max(max_f_a, std::sqrt(block.f_x_a * block.f_x_a + block.f_y_a * block.f_y_a));
+      max_f_r = std::max(max_f_r, std::sqrt(block.f_x_r * block.f_x_r + block.f_y_r * block.f_y_r));
     }
-    max_f_x = std::max(max_f_x, 1.0f);
-    max_f_y = std::max(max_f_y, 1.0f);
+    max_f_a = std::max(max_f_a, 1.0f);
+    max_f_r = std::max(max_f_r, 1.0f);
     // Move node
     // The move will be cancelled if the block will be pushed out of the boundary
     for (auto& block : blocks) {
-      const float x_dist = block.f_x / max_f_x * max_move_dist;
-      const float y_dist = block.f_y / max_f_y * max_move_dist;
+      const float f_x = attract_factor * block.f_x_a / max_f_a + repulsive_factor * block.f_x_r / max_f_r;
+      const float f_y = attract_factor * block.f_y_a / max_f_a + repulsive_factor * block.f_y_r / max_f_r;
+      block.setForce(f_x, f_y);
+      max_f = std::max(max_f, std::sqrt(block.f_x * block.f_x + block.f_y * block.f_y));
+    }
+    max_f = std::max(max_f, 1.0f);
+    for (auto& block : blocks) {
+      const float x_dist = block.f_x / max_f * max_move_dist + (distribution(rand_gen) - 0.5) * 0.1 * max_move_dist;
+      const float y_dist = block.f_y / max_f * max_move_dist + (distribution(rand_gen) - 0.5) * 0.1 * max_move_dist;
       block.move(x_dist, y_dist, 0.0f, 0.0f, outline_width, outline_height);
     }
   };
 
   // initialize all the macros
   for (auto& block : blocks) {
-    block.setLoc(outline_width * distribution(rand_gen),  outline_height * distribution(rand_gen));
     block.makeSquare(ar);
+    block.setLoc(outline_width * distribution(rand_gen),  outline_height * distribution(rand_gen),
+                 0.0f, 0.0f, outline_width, outline_height);
   }
   
   // Iteratively place the blocks
@@ -4695,9 +4736,10 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
     const float attract_factor = attract_factors[i];
     const float repulsive_factor = repel_factors[i];
     for (auto j = 0; j < num_steps[i]; j++)
-      MoveBlock(attract_factor, repulsive_factor, max_size / (j + 1));
+      MoveBlock(attract_factor, repulsive_factor, max_size / (1 + std::floor(j / 100)));
   }
 
+  /*
   std::string net_file = file_name + ".net.txt";
   std::string block_file = file_name + ".block.txt";
   std::ofstream file;
@@ -4709,6 +4751,7 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
   for (auto& net : nets)
     file << net.terminals.first << "  " << net.terminals.second << "  " << net.weight << std::endl;
   file.close();
+  */
 }
 
 void HierRTLMP::setDebug()
