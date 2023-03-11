@@ -252,6 +252,9 @@ class HierRTLMP
                    float outline_height,
                    std::string file_name);
 
+  void RTMLEmbedding(Cluster* parent);
+  std::pair<int, int> getInstIOs(odb::dbInst* inst);
+
   sta::dbNetwork* network_ = nullptr;
   odb::dbDatabase* db_ = nullptr;
   odb::dbBlock* block_ = nullptr;

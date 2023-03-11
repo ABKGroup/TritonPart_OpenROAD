@@ -372,6 +372,10 @@ void HierRTLMP::hierRTLMacroPlacer()
       util,
       core_util);
 
+
+  // set all the levels to 1
+  max_num_level_ = 1;
+
   setDefaultThresholds();
   // report the default parameters
   logger_->report("area_weight_ = {}", area_weight_);
@@ -441,6 +445,11 @@ void HierRTLMP::hierRTLMacroPlacer()
       "\nPrint Physical Hierachy Tree after splitting std cell and macros in "
       "leaf clusters\n");
   printPhysicalHierarchyTree(root_cluster_, 0);
+
+  RTMLEmbedding(root_cluster_);
+
+  // write the locations and clusters
+  return;
 
   // Map the macros in each cluster to their HardMacro objects
   for (auto& [cluster_id, cluster] : cluster_map_) {
@@ -547,6 +556,10 @@ Metrics* HierRTLMP::computeMetrics(odb::dbModule* module)
   float std_cell_area = 0.0;
   unsigned int num_macro = 0;
   float macro_area = 0.0;
+  int num_inputs = 0;
+  int num_outputs = 0;
+  int num_comb_insts = 0;
+  int num_ffs = 0;
 
   for (odb::dbInst* inst : module->getInsts()) {
     const sta::LibertyCell* liberty_cell = network_->libertyCell(inst);
@@ -558,6 +571,10 @@ Metrics* HierRTLMP::computeMetrics(odb::dbModule* module)
       continue;
     }
 
+    const std::pair<int, int> stats = getInstIOs(inst);
+    num_inputs += stats.first;
+    num_outputs += stats.second;
+
     float inst_area = liberty_cell->area();
     if (master->isBlock()) {  // a macro
       num_macro += 1;
@@ -568,6 +585,11 @@ Metrics* HierRTLMP::computeMetrics(odb::dbModule* module)
     } else {
       num_std_cell += 1;
       std_cell_area += inst_area;
+      if (liberty_cell->hasSequentials()) {
+        num_ffs++;
+      } else {
+        num_comb_insts++;
+      }
     }
   }
 
@@ -581,12 +603,40 @@ Metrics* HierRTLMP::computeMetrics(odb::dbModule* module)
     std_cell_area += metrics->getStdCellArea();
     num_macro += metrics->getNumMacro();
     macro_area += metrics->getMacroArea();
+    num_inputs += metrics->num_inputs_;
+    num_outputs += metrics->num_outputs_;
+    num_comb_insts += metrics->num_comb_insts_;
+    num_ffs += metrics->num_ffs_;
   }
 
   Metrics* metrics
       = new Metrics(num_std_cell, num_macro, std_cell_area, macro_area);
+  metrics->num_inputs_ = num_inputs;
+  metrics->num_outputs_ = num_outputs;
+  metrics->num_comb_insts_ = num_comb_insts;
+  metrics->num_ffs_ = num_ffs;
   logical_module_map_[module] = metrics;
   return metrics;
+}
+
+
+std::pair<int, int> HierRTLMP::getInstIOs(odb::dbInst* inst) {
+  int num_inputs = 0;
+  int num_outputs = 0;
+  for (auto iterm : inst->getITerms()) {
+    if (iterm->getSigType() == odb::dbSigType::SIGNAL) {
+      if (iterm->getIoType() == odb::dbIoType::INPUT) {
+        num_inputs++;
+      } else if (iterm->getIoType() == odb::dbIoType::OUTPUT) {
+        num_outputs++;
+      }
+    }
+  }
+  //odb::dbMaster* master = inst->getMaster();
+  //logger_->report("master name : {}", master->getName());
+  //logger_->report("inst_name = {}, num_inputs = {}, num_outputs = {}", 
+  //                 inst->getName(), num_inputs, num_outputs);
+  return std::pair<int, int>(num_inputs, num_outputs);
 }
 
 // compute the metrics for a cluster
@@ -601,17 +651,39 @@ void HierRTLMP::setClusterMetrics(Cluster* cluster)
   unsigned int num_macro = 0;
   float std_cell_area = 0.0;
   float macro_area = 0.0;
+  int num_inputs = 0;
+  int num_outputs = 0;
+  int num_comb_insts = 0;
+  int num_ffs = 0;
   num_std_cell += cluster->getLeafStdCells().size();
   num_macro += cluster->getLeafMacros().size();
   for (odb::dbInst* inst : cluster->getLeafStdCells()) {
+    const std::pair<int, int> stats = getInstIOs(inst);
+    num_inputs += stats.first;
+    num_outputs += stats.second;
+
     const sta::LibertyCell* liberty_cell = network_->libertyCell(inst);
     std_cell_area += liberty_cell->area();
+    if (liberty_cell->hasSequentials()) {
+      num_ffs++;
+    } else {
+      num_comb_insts++;
+    }
   }
+  
   for (odb::dbInst* inst : cluster->getLeafMacros()) {
-    const sta::LibertyCell* liberty_cell = network_->libertyCell(inst);
+    const sta::LibertyCell* liberty_cell = network_->libertyCell(inst); 
     macro_area += liberty_cell->area();
+    const std::pair<int, int> stats = getInstIOs(inst);
+    num_inputs += stats.first;
+    num_outputs += stats.second;
   }
+
   Metrics metrics(num_std_cell, num_macro, std_cell_area, macro_area);
+  metrics.num_comb_insts_ = num_comb_insts;
+  metrics.num_ffs_ = num_ffs;
+  metrics.num_inputs_ = num_inputs;
+  metrics.num_outputs_ = num_outputs;
   for (auto& module : cluster->getDbModules()) {
     metrics.addMetrics(*logical_module_map_[module]);
   }
@@ -630,6 +702,9 @@ void HierRTLMP::setClusterMetrics(Cluster* cluster)
              metrics.getNumMacro(),
              metrics.getNumStdCell());
 
+  cluster->setMetrics(metrics);
+
+  /*
   // update metrics based on design type
   if (cluster->getClusterType() == HardMacroCluster) {
     cluster->setMetrics(
@@ -640,6 +715,7 @@ void HierRTLMP::setClusterMetrics(Cluster* cluster)
   } else {
     cluster->setMetrics(metrics);
   }
+  */
 }
 
 //
@@ -3797,6 +3873,184 @@ void HierRTLMP::mergeNets(std::vector<BundledNet>& nets)
   nets = merged_nets;
 }
 
+
+// Generate embedding for RTML project
+// Extracted the clustered netlist and generate embedding using force-directed placement
+void HierRTLMP::RTMLEmbedding(Cluster* parent)
+{
+  // This function only works for root cluster
+  if (parent->getParent() != nullptr) {
+    logger_->report("[INFO] Warning.  The current cluster is not the root cluster. cluster = {}", 
+                     parent->getName());
+    return;
+  }
+
+  // set the instance property
+  for (auto& cluster : parent->getChildren()) {
+    setInstProperty(cluster);
+  }
+  
+  // detemine the settings for simulated annealing engine
+  // Set outline information
+  const float lx = floorplan_lx_;
+  const float ly = floorplan_ly_;
+  const float ux = floorplan_ux_;
+  const float uy = floorplan_uy_;
+  const float outline_width = ux - lx;
+  const float outline_height = uy - ly;
+
+  logger_->report(
+      "[Boundary Information] lx = {}, ly = {}, ux = {}, uy = {}",
+      lx,
+      ly,
+      outline_width,
+      outline_height);
+
+  // Suppose the region, fence, guide has been mapped to cooresponding macros
+  // This step is done when we enter the Hier-RTLMP program
+  std::map<std::string, int> soft_macro_id_map;  // cluster_name, macro_id
+  std::map<int, int> macro_cluster_id_map;
+  std::map<int, std::string> id_soft_macro_map; // macro_id, cluster_name
+  std::vector<BundledNet> nets;
+  std::vector<Rect> macros;
+
+  // Each cluster is modeled as Soft Macro
+  for (auto& cluster : parent->getChildren()) {
+    // for IO cluster
+    if (cluster->getIOClusterFlag()) {
+      soft_macro_id_map[cluster->getName()] = macros.size();
+      id_soft_macro_map[macros.size()] = cluster->getName();
+      macro_cluster_id_map[macros.size()] = cluster->getId();
+      macros.emplace_back(Rect(cluster->getX() - lx, 
+                               cluster->getY() - ly,
+                               cluster->getX() - lx + cluster->getWidth(),
+                               cluster->getY() - ly + cluster->getHeight(),
+                               true));      
+      continue;
+    }
+    // for other clusters
+    soft_macro_id_map[cluster->getName()] = macros.size();
+    id_soft_macro_map[macros.size()] = cluster->getName();
+    macro_cluster_id_map[macros.size()] = cluster->getId();
+    const float lx = 0.0;
+    const float ly = 0.0;
+    const float area = cluster->getArea();
+    // each soft macro is modeled as a square
+    const float width = std::sqrt(area);
+    logger_->report("cluster_name : {}, area = {}, width = {}", cluster->getName(), area, width);
+    macros.emplace_back(Rect(0.0f, 0.0f, width, width));  
+    Rect& temp_macro = macros[macros.size() - 1];
+    logger_->report("lx = {}, ly = {}, ux = {}, uy = {}",
+                    temp_macro.xMin(), temp_macro.yMin(),
+                    temp_macro.xMax(), temp_macro.yMax()); 
+    setInstProperty(cluster);  // we need this step to calculate nets
+  }
+
+
+  // update the connnection
+  calculateConnection();
+  logger_->report("[RTML Embedding] Finish calculating connection");
+  updateDataFlow();
+  logger_->report("[RTML Embedding] Finish updating dataflow");
+
+  // add the virtual connections (the weight related to IOs and macros belong to
+  // the same cluster)
+  for (const auto& [cluster1, cluster2] : parent->getVirtualConnections()) {
+    BundledNet net(soft_macro_id_map[cluster_map_[cluster1]->getName()],
+                   soft_macro_id_map[cluster_map_[cluster2]->getName()],
+                   virtual_weight_);
+    net.src_cluster_id = cluster1;
+    net.target_cluster_id = cluster2;
+    nets.push_back(net);
+  }
+
+  // convert the connections between clusters to SoftMacros
+  for (auto& cluster : parent->getChildren()) {
+    const int src_id = cluster->getId();
+    const std::string src_name = cluster->getName();
+    for (auto& [cluster_id, weight] : cluster->getConnection()) {
+      debugPrint(logger_,
+                 MPL,
+                 "macro_placement",
+                 1,
+                 " Cluster connection: {} {} {} ",
+                 cluster->getName(),
+                 cluster_map_[cluster_id]->getName(),
+                 weight);
+      const std::string name = cluster_map_[cluster_id]->getName();
+      if (src_id > cluster_id) {
+        BundledNet net(
+            soft_macro_id_map[src_name], soft_macro_id_map[name], weight);
+        net.src_cluster_id = src_id;
+        net.target_cluster_id = cluster_id;
+        nets.push_back(net);
+      }
+    }
+  }
+  logger_->report("Finish creating bundled connections");
+  // merge nets to reduce runtime
+  mergeNets(nets);
+  
+  for (auto& cluster : parent->getChildren()) {
+    setClusterMetrics(cluster);
+  }
+
+  // Use FDPlacement to place soft macros
+  FDPlacement(macros, nets, outline_width, outline_height, "dummy.txt");
+
+  // Write the connections between macros
+  std::ofstream file;
+  std::string file_name = parent->getName();
+  for (int i = 0; i < file_name.size(); i++) {
+    if (file_name[i] == '/') {
+      file_name[i] = '*';
+    }
+  }
+
+  file_name = report_directory_ + "/" + file_name;
+  file.open(file_name + ".net.txt");
+  for (auto& net : nets) {
+    file << id_soft_macro_map[net.terminals.first] << "  "
+         << id_soft_macro_map[net.terminals.second] << "  "
+         << net.weight 
+         << std::endl; 
+  }
+  file.close();
+
+  file.open(file_name + ".embed.txt");
+  std::string line = "name lx ly ux uy num_comb_insts num_ffs num_macros avg_fanins avg_fanouts";
+  file << line << std::endl;
+  for (auto i = 0; i < macros.size(); i++) {
+    file << id_soft_macro_map[i] << "  "
+         << macros[i].xMin() << "  "
+         << macros[i].yMin() << "  "
+         << macros[i].xMax() << "  "
+         << macros[i].yMax() << "  ";
+    auto metric = cluster_map_[macro_cluster_id_map[i]]->getMetrics();
+    const int num_inst = metric.num_comb_insts_ + 
+                         metric.num_ffs_ + 
+                         metric.num_macro_;
+    logger_->report("num_inst : {}, num_macro {}"
+                    "num_comb_inst : {}, num_ff : {}", 
+                    cluster_map_[macro_cluster_id_map[i]]->getNumStdCell(),
+                    cluster_map_[macro_cluster_id_map[i]]->getNumMacro(),
+                    metric.num_comb_insts_,
+                    metric.num_ffs_
+                    );
+    
+    if (num_inst <= 0) {
+      file << "0 0 0 0 0" << std::endl;
+    } else {
+      file << metric.num_comb_insts_ << "  "
+           << metric.num_ffs_ << "  "
+           << metric.num_macro_ << "  "
+           << metric.num_inputs_ * 1.0 / num_inst << " "
+           << metric.num_outputs_ * 1.0 / num_inst  << std::endl;
+    }
+  }
+  file.close();
+}
+
 // Multilevel macro placement without bus planning
 void HierRTLMP::multiLevelMacroPlacementWithoutBusPlanning(Cluster* parent)
 {
@@ -5666,13 +5920,22 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
 
   // initialize all the macros
   for (auto& block : blocks) {
-    block.makeSquare(ar);
+    logger_->report("lx = {}, ly = {}, ux = {}, uy = {}",
+                     block.xMin(), block.yMin(),
+                     block.xMax(), block.yMax());             
+    //block.makeSquare(ar);
     block.setLoc(outline_width * distribution(rand_gen),
                  outline_height * distribution(rand_gen),
                  0.0f,
                  0.0f,
                  outline_width,
                  outline_height);
+  }
+
+  for (auto& block : blocks) {
+    logger_->report("lx = {}, ly = {}, ux = {}, uy = {}",
+                     block.xMin(), block.yMin(),
+                     block.xMax(), block.yMax());             
   }
 
   // Iteratively place the blocks

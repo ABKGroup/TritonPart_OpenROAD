@@ -148,7 +148,12 @@ class Metrics
   float getInflateMacroArea() const;
   float getInflateArea() const;
 
- private:
+  int num_inputs_ = 0;
+  int num_outputs_ = 0;
+  int num_comb_insts_ = 0;
+  int num_ffs_ = 0;
+
+  //private:
   // In the hierarchical autoclustering part,
   // we cluster the logical modules or clusters
   // based on num_std_cell and num_macro

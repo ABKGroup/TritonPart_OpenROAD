@@ -117,6 +117,10 @@ void Metrics::addMetrics(const Metrics& metrics)
   macro_area_ += metrics.macro_area_;
   inflate_std_cell_area_ += metrics.inflate_std_cell_area_;
   inflate_macro_area_ += metrics.inflate_macro_area_;
+  num_inputs_ += metrics.num_inputs_;
+  num_outputs_ += metrics.num_outputs_;
+  num_comb_insts_ += metrics.num_comb_insts_;
+  num_ffs_ += metrics.num_ffs_;
 }
 
 void Metrics::inflateStdCellArea(float std_cell_util)
