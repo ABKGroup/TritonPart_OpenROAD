@@ -67,6 +67,7 @@ messages(
 target_include_directories(mpl2
   PUBLIC
     include
+    src
 )
 
 target_link_libraries(mpl2

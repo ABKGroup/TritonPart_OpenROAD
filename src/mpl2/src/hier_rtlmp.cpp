@@ -39,11 +39,11 @@
 #include <queue>
 #include <thread>
 
+#include "Mpl2Observer.h"
 #include "SACoreHardMacro.h"
 #include "SACoreSoftMacro.h"
 #include "bus_synthesis.h"
 #include "db_sta/dbNetwork.hh"
-#include "graphics.h"
 #include "object.h"
 #include "odb/db.h"
 #include "par/PartitionMgr.h"
@@ -317,6 +317,7 @@ void HierRTLMP::hierRTLMacroPlacer()
   //
   block_ = db_->getChip()->getBlock();
   dbu_ = db_->getTech()->getDbUnitsPerMicron();
+  manufacturing_unit_ = db_->getTech()->getManufacturingGrid();
 
   //
   // Get the floorplan information
@@ -446,7 +447,7 @@ void HierRTLMP::hierRTLMacroPlacer()
         cluster->setClusterType(HardMacroCluster);
         root_cluster_->addChild(cluster);
         logger_->report("model {} as a cluster.", cluster_name);
-      } 
+      }
     }
     // reset parameters
     pos_swap_prob_ = 0.2;
@@ -454,24 +455,23 @@ void HierRTLMP::hierRTLMacroPlacer()
     double_swap_prob_ = 0.2;
     exchange_swap_prob_ = 0.2;
     flip_prob_ = 0.2;
-    resize_prob_ = 0.0; 
+    resize_prob_ = 0.0;
     guidance_weight_ = 0.0;
     fence_weight_ = 0.0;
     boundary_weight_ = 0.0;
     notch_weight_ = 0.0;
     macro_blockage_weight_ = 0.0;
-    //virtual_weight_ = 1.0;
-    //max_num_ff_dist_ = 1;  
-    //dataflow_weight_ = 1.0;    
+    // virtual_weight_ = 1.0;
+    // max_num_ff_dist_ = 1;
+    // dataflow_weight_ = 1.0;
   } else {
     multiLevelCluster(root_cluster_);
     //
     // Break mixed leaf clusters into a standard-cell cluster and hard-macro
-    // clusters. Merge macros based on connection signatures and footprints. Based
-    // on types of designs, we support two types of breaking up. Suppose current
-    // cluster is A --
-    // Type 1:  Replace A by A1, A2, A3
-    // Type 2:  Create a subtree for A
+    // clusters. Merge macros based on connection signatures and footprints.
+    // Based on types of designs, we support two types of breaking up. Suppose
+    // current cluster is A -- Type 1:  Replace A by A1, A2, A3 Type 2:  Create
+    // a subtree for A
     //          A  ->    A
     //               |  |   |
     //              A1  A2  A3
@@ -606,7 +606,7 @@ Metrics* HierRTLMP::computeMetrics(odb::dbModule* module)
       num_macro += 1;
       macro_area += inst_area;
       // add hard macro to corresponding map
-      HardMacro* macro = new HardMacro(inst, dbu_, halo_width_);
+      HardMacro* macro = new HardMacro(inst, dbu_, manufacturing_unit_, halo_width_);
       hard_macro_map_[inst] = macro;
     } else {
       num_std_cell += 1;
@@ -2010,17 +2010,19 @@ void HierRTLMP::breakLargeFlatCluster(Cluster* parent)
     }
   }
 
-  const int seed = 0;
-  const float balance_constraint = 5.0;
-  const int num_vertices = vertex_weight.size();
-  const int num_hyperedges = hyperedges.size();
 
-  std::vector<int> part = tritonpart_->TritonPart2Way(num_vertices,
-                                                      num_hyperedges,
-                                                      hyperedges,
-                                                      vertex_weight,
-                                                      balance_constraint,
-                                                      seed);
+  const int seed = 0;
+  const float balance_constraint = 1.0;
+  const int num_parts = 2; // We use two-way partitioning here
+  const int num_vertices = static_cast<int>(vertex_weight.size());
+  std::vector<float> hyperedge_weights(hyperedges.size(), 1.0f);
+  std::vector<int> part =
+  tritonpart_->PartitionKWaySimpleMode(num_parts,
+                                          balance_constraint,
+                                          seed,
+                                          hyperedges,
+                                          vertex_weight,
+                                          hyperedge_weights);
 
   // create cluster based on partitioning solutions
   // Note that all the std cells are stored in the leaf_std_cells_ for a flat
@@ -2425,16 +2427,16 @@ void HierRTLMP::calClusterMacroTilings(Cluster* parent)
           width,
           height,
           macros,
-          1.0,
-          1000.0,
-          0.0,
-          0.0,
-          0.0,
-          0.0,
-          0.0,
-          0.0,  // penalty weight
-          0.0,  // no notch size
-          0.0,  // no notch size
+          1.0,     // area weight
+          1000.0,  // outline weight
+          0.0,     // wirelength weight
+          0.0,     // guidance weight
+          0.0,     // fence weight
+          0.0,     // boundary weight
+          0.0,     // macro blockage
+          0.0,     // notch weight
+          0.0,     // no notch size
+          0.0,     // no notch size
           pos_swap_prob_ / action_sum,
           neg_swap_prob_ / action_sum,
           double_swap_prob_ / action_sum,
@@ -2487,16 +2489,16 @@ void HierRTLMP::calClusterMacroTilings(Cluster* parent)
           width,
           height,
           macros,
-          1.0,
-          1000.0,
-          0.0,
-          0.0,
-          0.0,
-          0.0,
-          0.0,
-          0.0,  // penalty weight
-          0.0,  // no notch size
-          0.0,  // no notch size
+          1.0,     // area weight
+          1000.0,  // outline weight
+          0.0,     // wirelength weight
+          0.0,     // guidance weight
+          0.0,     // fence weight
+          0.0,     // boundary weight
+          0.0,     // macro blockage
+          0.0,     // notch weight
+          0.0,     // no notch size
+          0.0,     // no notch size
           pos_swap_prob_ / action_sum,
           neg_swap_prob_ / action_sum,
           double_swap_prob_ / action_sum,
@@ -2656,11 +2658,11 @@ void HierRTLMP::calHardMacroClusterShape(Cluster* cluster)
           width,
           height,
           macros,
-          1.0,     // area_weight_
-          1000.0,  // boundary weight_
-          0.0,
-          0.0,
-          0.0,  // penalty weight
+          1.0,     // area_weight
+          1000.0,  // outline weight
+          0.0,     // wirelength weight
+          0.0,     // guidance
+          0.0,     // fence weight
           pos_swap_prob_ / action_sum,
           neg_swap_prob_ / action_sum,
           double_swap_prob_ / action_sum,
@@ -2713,11 +2715,11 @@ void HierRTLMP::calHardMacroClusterShape(Cluster* cluster)
           = new SACoreHardMacro(width,
                                 height,
                                 macros,
-                                1.0,  // area_weight_
-                                1000.0,
-                                0.0,
-                                0.0,
-                                0.0,  // penalty weight
+                                1.0,     // area_weight
+                                1000.0,  // outline weight
+                                0.0,     // wirelength weight
+                                0.0,     // guidance
+                                0.0,     // fence weight
                                 pos_swap_prob_ / action_sum,
                                 neg_swap_prob_ / action_sum,
                                 double_swap_prob_ / action_sum,
@@ -2793,6 +2795,16 @@ void HierRTLMP::calHardMacroClusterShape(Cluster* cluster)
                    "This no valid tilings for hard macro cluser: {}",
                    cluster->getName());
   }
+
+  std::string line
+      = "[CalClusterMacroTilings] The macro tiling for hard cluster "
+        + cluster->getName() + "  ";
+  for (auto& shape : tilings) {
+    line += " < " + std::to_string(shape.first) + " , ";
+    line += std::to_string(shape.second) + " >  ";
+  }
+  line += "\n";
+  debugPrint(logger_, MPL, "shaping", 1, "{}", line);
 }
 
 //
@@ -5204,9 +5216,9 @@ void HierRTLMP::alignHardMacroGlobal(Cluster* parent)
   int boundary_h_th = std::numeric_limits<int>::max();
   for (auto& macro_inst : hard_macros) {
     boundary_h_th = std::min(
-        boundary_h_th, static_cast<int>(macro_inst->getRealWidthDBU() * 1.0));
+        boundary_h_th, static_cast<int>(macro_inst->getWidthDBU() * 1.0));
     boundary_v_th = std::min(
-        boundary_v_th, static_cast<int>(macro_inst->getRealHeightDBU() * 1.0));
+        boundary_v_th, static_cast<int>(macro_inst->getHeightDBU() * 1.0));
   }
   // const int notch_v_th = std::min(micronToDbu(notch_v_th_, dbu_),
   // boundary_v_th); const int notch_h_th = std::min(micronToDbu(notch_h_th_,
@@ -5224,10 +5236,10 @@ void HierRTLMP::alignHardMacroGlobal(Cluster* parent)
   // define lamda function for check if the move is allowed
   auto isValidMove = [&](size_t macro_id) {
     // check if the macro can fit into the core area
-    const int macro_lx = hard_macros[macro_id]->getRealXDBU();
-    const int macro_ly = hard_macros[macro_id]->getRealYDBU();
-    const int macro_ux = hard_macros[macro_id]->getRealUXDBU();
-    const int macro_uy = hard_macros[macro_id]->getRealUYDBU();
+    const int macro_lx = hard_macros[macro_id]->getXDBU();
+    const int macro_ly = hard_macros[macro_id]->getYDBU();
+    const int macro_ux = hard_macros[macro_id]->getUXDBU();
+    const int macro_uy = hard_macros[macro_id]->getUYDBU();
     if (macro_lx < core_lx || macro_ly < core_ly || macro_ux > core_ux
         || macro_uy > core_uy)
       return false;
@@ -5235,10 +5247,10 @@ void HierRTLMP::alignHardMacroGlobal(Cluster* parent)
     for (auto i = 0; i < hard_macros.size(); i++) {
       if (i == macro_id)
         continue;
-      const int lx = hard_macros[i]->getRealXDBU();
-      const int ly = hard_macros[i]->getRealYDBU();
-      const int ux = hard_macros[i]->getRealUXDBU();
-      const int uy = hard_macros[i]->getRealUYDBU();
+      const int lx = hard_macros[i]->getXDBU();
+      const int ly = hard_macros[i]->getYDBU();
+      const int ux = hard_macros[i]->getUXDBU();
+      const int uy = hard_macros[i]->getUYDBU();
       if (macro_lx >= ux || macro_ly >= uy || macro_ux <= lx || macro_uy <= ly)
         continue;
       else
@@ -5730,10 +5742,9 @@ void HierRTLMP::FDPlacement(std::vector<Rect>& blocks,
   }
 }
 
-void HierRTLMP::setDebug()
+void HierRTLMP::setDebug(std::unique_ptr<Mpl2Observer>& graphics)
 {
-  int dbu = db_->getTech()->getDbUnitsPerMicron();
-  graphics_ = std::make_unique<Graphics>(dbu, logger_);
+  graphics_ = std::move(graphics);
 }
 
 }  // namespace mpl2

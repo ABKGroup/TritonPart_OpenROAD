@@ -69,6 +69,9 @@ option(USE_SYSTEM_OPENSTA "Use system shared OpenSTA library" OFF)
 # Allow to use external shared abc libraries
 option(USE_SYSTEM_ABC "Use system shared ABC library" OFF)
 
+# Allow disabling tests
+option(ENABLE_TESTS "Enable OpenROAD tests" ON)
+
 project(OpenROAD VERSION 1
   LANGUAGES CXX
 )
@@ -137,22 +140,14 @@ configure_file(
 # Ask CMake to output a compile_commands.json file for use with things like clang-tidy
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
 
-# GTEST
-find_package(GTest)
-if(NOT GTest_FOUND)
-  include(FetchContent)
-  FetchContent_Declare(
-    googletest
-    # Specify the commit you depend on and update it regularly.
-    URL https://github.com/google/googletest/archive/refs/tags/v1.13.0.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  )
-  FetchContent_MakeAvailable(googletest)
-endif()
-enable_testing()
-add_custom_target(build_and_test ${CMAKE_CTEST_COMMAND} --parallel --output-on-failure)
-include(GoogleTest)
-# GTEST
+
 
 add_subdirectory(third-party)
+
+if(ENABLE_TESTS)
+  enable_testing()
+  add_custom_target(build_and_test ${CMAKE_CTEST_COMMAND} --parallel --output-on-failure)
+  include(GoogleTest)
+endif()
+
 add_subdirectory(src)
