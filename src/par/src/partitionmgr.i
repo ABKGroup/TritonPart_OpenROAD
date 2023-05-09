@@ -146,7 +146,6 @@ void evaluate_hypergraph_solution(unsigned int num_parts,
                                   const char* fixed_file,
                                   const char* group_file,
                                   const char* solution_file,
-                                  // weight parameters
                                   const char* e_wt_factors_str,
                                   const char* v_wt_factors_str)
 {

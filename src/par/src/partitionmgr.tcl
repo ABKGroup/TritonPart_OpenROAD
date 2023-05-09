@@ -375,17 +375,17 @@ proc evaluate_hypergraph_solution { args } {
 
   if { [info exists keys(-e_wt_factors)] } {
     set e_wt_factors $keys(-e_wt_factors)
+    set e_wt_factors [list $e_wt_factors]
   }
 
   if { [info exists keys(-v_wt_factors)] } {
     set v_wt_factors $keys(-v_wt_factors)
+    set v_wt_factors [list $v_wt_factors]
   }
- 
-  puts "evaluate_hypergraph_solution"
-  puts "num_parts : ${num_parts}"
-  puts "v_wt_factors : ${v_wt_factors}"  
 
-
+  set e_wt_factors [list $e_wt_factors]
+  set v_wt_factors [list $v_wt_factors]
+  
   par::evaluate_hypergraph_solution $num_parts \
             $balance_constraint \
             $vertex_dimension \
@@ -393,9 +393,9 @@ proc evaluate_hypergraph_solution { args } {
             $hypergraph_file \
             $fixed_file \
             $group_file \
-            $solution_file \ 
-            $e_wt_factors 
-
+            $solution_file \
+            $e_wt_factors \
+            $v_wt_factors
 }
 
 
